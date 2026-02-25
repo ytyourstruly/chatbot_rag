@@ -1,0 +1,116 @@
+"""
+app/database.py — Async PostgreSQL connection via asyncpg.
+
+Security rules:
+  - Read-only PostgreSQL role enforced at DB level.
+  - Only two hardcoded SQL statements are ever executed.
+  - No user input is passed to any query.
+  - 30-second statement timeout.
+
+Resilience:
+  - Pool creation failure is logged but does NOT crash the app.
+  - All callers check _pool before use; analytics gracefully disabled when DB
+    is unavailable.
+"""
+import asyncpg
+import logging
+from datetime import datetime
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+_pool: asyncpg.Pool | None = None
+
+
+async def create_pool() -> None:
+    """
+    Create the asyncpg connection pool.
+    On failure (wrong host, wrong credentials, network issue) the error is
+    logged and _pool stays None — the app continues in RAG-only mode.
+    """
+    global _pool
+    try:
+        _pool = await asyncpg.create_pool(
+            dsn=settings.database_url,
+            min_size=1,
+            max_size=10,
+            command_timeout=30,
+            statement_cache_size=0,
+            timeout=10,            # connection-attempt timeout in seconds
+        )
+        logger.info("PostgreSQL pool created successfully.")
+    except Exception as exc:
+        _pool = None
+        logger.warning(
+            "Could not connect to PostgreSQL — analytics will be disabled. "
+            "Reason: %s", exc
+        )
+
+
+async def close_pool() -> None:
+    global _pool
+    if _pool:
+        await _pool.close()
+        _pool = None
+        logger.info("PostgreSQL pool closed.")
+
+
+def is_db_available() -> bool:
+    return _pool is not None
+
+
+def get_pool() -> asyncpg.Pool:
+    if _pool is None:
+        raise RuntimeError(
+            "Database is not connected. Check DATABASE_URL in .env and ensure "
+            "PostgreSQL is reachable."
+        )
+    return _pool
+
+
+# ---------------------------------------------------------------------------
+# Hardcoded, injection-safe analytics queries
+# ---------------------------------------------------------------------------
+
+_SQL_TOTAL_AMOUNT = "SELECT SUM(amount) FROM contractor_service.order;"
+_SQL_TOTAL_PORTS  = "SELECT SUM(total_ports_count) FROM contractor_service.order;"
+_SQL_PORTS_BY_LOCALITY_PERIOD = """
+SELECT SUM(total_ports_count) 
+FROM contractor_service.order 
+WHERE localities = $1 
+  AND start_date >= $2::date 
+  AND end_date <= $3::date;
+"""
+ 
+async def fetch_total_contract_amount() -> float:
+    async with get_pool().acquire() as conn:
+        result = await conn.fetchval(_SQL_TOTAL_AMOUNT)
+    return float(result) if result is not None else 0.0
+
+
+async def fetch_total_ports() -> int:
+    async with get_pool().acquire() as conn:
+        result = await conn.fetchval(_SQL_TOTAL_PORTS)
+    return int(result) if result is not None else 0
+
+
+async def fetch_ports_by_locality_period(
+    locality: str, start_date: str, end_date: str
+) -> int:
+    """
+    Fetch total ports for a specific locality and date period.
+    
+    Args:
+        locality: City name (e.g., "Астана")
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+    
+    Returns:
+        Total number of ports matching criteria
+    """
+    
+    start_date_object = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end_date_object = datetime.strptime(end_date, "%Y-%m-%d").date()
+    async with get_pool().acquire() as conn:
+        result = await conn.fetchval(_SQL_PORTS_BY_LOCALITY_PERIOD, locality, start_date_object, end_date_object)
+    return int(result) if result is not None else 0

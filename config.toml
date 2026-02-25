@@ -1,0 +1,13 @@
+[project]
+# Name shown in the Chainlit UI
+name = "Website Chatbot"
+
+[features]
+# Allow users to upload files (disable for MVP security)
+spontaneous_file_upload = false
+audio.enabled = false
+
+[UI]
+name = "Website Assistant"
+description = "Ask questions about our platform or request analytics."
+default_collapse_content = true

@@ -1,0 +1,28 @@
+# Core
+fastapi
+uvicorn[standard]
+python-dotenv
+pydantic
+
+# LangChain + OpenAI
+langchain
+langchain-openai
+langchain-community
+openai
+
+# Vector DB
+faiss-cpu
+
+# Database
+asyncpg
+
+# Chainlit
+chainlit
+
+# Utilities
+tiktoken
+httpx
+
+pypdf
+pdfminer.six
+unstructured[pdf]
