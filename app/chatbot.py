@@ -55,25 +55,25 @@ async def process_question(
     
     # ── Step 2: Vector search ────────────────────────────────────────────────
     # TODO: remove if needed from Dias the boss
-    await _notify("Поиск из документации…")
-    context, similarity = await retrieve_context(question)
-    logger.info("RAG similarity score: %.3f (threshold: %.3f)", similarity, settings.min_similarity_score)
+    # await _notify("Поиск из документации…")
+    # context, similarity = await retrieve_context(question)
+    # logger.info("RAG similarity score: %.3f (threshold: %.3f)", similarity, settings.min_similarity_score)
 
-    # ── Step 3: High-confidence RAG answer ───────────────────────────────────
-    if similarity >= settings.min_similarity_score and context:
-        logger.info("Answering from documentation context.")
-        async for token in stream_rag_response(question, context):
-            yield token
-        return
+    # # ── Step 3: High-confidence RAG answer ───────────────────────────────────
+    # if similarity >= settings.min_similarity_score and context:
+    #     logger.info("Answering from documentation context.")
+    #     async for token in stream_rag_response(question, context):
+    #         yield token
+    #     return
 
 
-    # ── Step 4: General LLM answer (no DB, low RAG confidence) ───────────────
-    if context:
-        # We have some context but below threshold — still use it, just less confident
-        logger.info("Low-confidence RAG; streaming with partial context.")
-        async for token in stream_rag_response(question, context):
-            yield token
-    else:
-        logger.info("No context found; falling back to general LLM.")
-        async for token in stream_general_response(question):
-            yield token
+    # # ── Step 4: General LLM answer (no DB, low RAG confidence) ───────────────
+    # if context:
+    #     # We have some context but below threshold — still use it, just less confident
+    #     logger.info("Low-confidence RAG; streaming with partial context.")
+    #     async for token in stream_rag_response(question, context):
+    #         yield token
+    # else:
+    logger.info("No context found; falling back to general LLM.")
+    async for token in stream_general_response(question):
+        yield token

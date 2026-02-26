@@ -75,11 +75,13 @@ def get_pool() -> asyncpg.Pool:
 _SQL_TOTAL_AMOUNT = "SELECT SUM(amount) FROM contractor_service.order;"
 _SQL_TOTAL_PORTS  = "SELECT SUM(total_ports_count) FROM contractor_service.order;"
 _SQL_PORTS_BY_LOCALITY_PERIOD = """
-SELECT SUM(total_ports_count) 
-FROM contractor_service.order 
-WHERE localities = $1 
-  AND start_date >= $2::date 
-  AND end_date <= $3::date;
+SELECT SUM(contractor_service.address.ports_count) FROM contractor_service.address
+JOIN contractor_service.address_smr_status_history
+ON contractor_service.address.id=contractor_service.address_smr_status_history.address_id
+WHERE contractor_service.address.smr_status='CONNECTION_ALLOWED' 
+AND contractor_service.address.locality=$1
+AND contractor_service.address_smr_status_history.status_date_time >= $2::date     
+AND contractor_service.address_smr_status_history.status_date_time <= $3::date;
 """
  
 async def fetch_total_contract_amount() -> float:

@@ -38,7 +38,7 @@ def format_total_amount_prompt(amount: float) -> str:
     """Prompt for formatting total contract value response."""
     return f"""You are a helpful analytics assistant for a Kazakhstan telecom contractor platform.
 Format the following total contract value result into a brief, informative response in Russian (Markdown format).
-Include the value and a short explanation of what it means.
+Include the value and a short explanation of what it means. Only answer with provided information.
 
 Total contract value: {amount:,.2f}
 
@@ -50,7 +50,7 @@ def format_total_ports_prompt(ports: int) -> str:
     return f"""You are a helpful analytics assistant for a Kazakhstan telecom contractor platform.
 Format the following total deployed ports result into a brief, informative response in Russian (Markdown format).
 Include the number and a short explanation of what it represents.
-
+Only answer with provided information.
 Total deployed ports: {ports:,}
 
 Provide a concise, engaging response in Russian with proper Markdown formatting. Be unique and vary the phrasing."""
@@ -62,8 +62,8 @@ def format_ports_by_locality_period_prompt(
     """Prompt for formatting ports by locality and period response."""
     return f"""You are a helpful analytics assistant for a Kazakhstan telecom contractor platform.
 Format the following ports by locality and period result into a brief, informative response in Russian (Markdown format).
-Include the number, location, and time period.
-
+Include the number, location, and time period. Only answer with provided information.
+Always refer to ports as "порты" in Russian, not "портов" or other variations. Say "сдано" instead of "установлено" or "доставлено".
 Locality: {locality}
 Period: {start_date} to {end_date}
 Total ports delivered: {ports:,}
