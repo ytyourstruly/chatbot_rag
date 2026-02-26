@@ -6,12 +6,11 @@ INTENT_DETECTION = """You are an analytics intent detector for a Kazakhstan tele
 Analyze the following user question and determine what analytics query they are asking for.
 
 Available analytics queries:
-1. "total_amount" - Total contract value (SUM of all contract amounts)
-2. "total_ports" - Total deployed ports across all contracts
-3. "ports_by_locality_period" - Number of ports delivered in a specific locality during a specific time period
-4. "ports_by_month" - Delivered ports grouped by month (based on status_date_time), across ALL localities
-5. "ports_by_locality" - Delivered ports grouped by locality (cities/villages), across all time
-6. "delivered_addresses" - List of delivered addresses (with name and delivery date)
+1. "total_ports" - Total deployed ports across all contracts
+2. "ports_by_locality_period" - Number of ports delivered in a specific locality during a specific time period
+3. "ports_by_month" - Delivered ports grouped by month (based on status_date_time), across ALL localities
+4. "ports_by_locality" - Delivered ports grouped by locality (cities/villages), across all time
+5. "delivered_addresses" - List of delivered addresses (with name and delivery date)
 
 User question: "{question}"
 
@@ -31,23 +30,13 @@ Return a JSON response with exactly this format:
     }}
 }}
 
-For intent types 1 and 2, set parameters to empty dict or with all nulls.
-For intent type 3, extract locality name and date range from the question, including the whole month.
+For intent type 1, set parameters to empty dict or with all nulls.
+For intent type 2, extract locality name and date range from the question, including the whole month.
 For unsupported queries, return intent "unsupported" with null parameters.
 For non-analytics questions, return intent "none" with null parameters.
 
 Only return valid JSON, no additional text."""
 
-
-def format_total_amount_prompt(amount: float) -> str:
-    """Prompt for formatting total contract value response."""
-    return f"""You are a helpful analytics assistant for a Kazakhstan telecom contractor platform.
-Format the following total contract value result into a brief, informative response in Russian (Markdown format).
-Include the value and a short explanation of what it means. Only answer with provided information.
-
-Total contract value: {amount:,.2f}
-
-Provide a concise, engaging response in Russian with proper Markdown formatting. Be unique and vary the phrasing."""
 
 
 def format_total_ports_prompt(ports: int) -> str:

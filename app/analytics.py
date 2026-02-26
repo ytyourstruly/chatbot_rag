@@ -2,9 +2,11 @@
 app/analytics.py — LLM-based intent detection + safe DB calls.
 
 Analytics queries supported:
-  1. Total contract value  → SUM(amount)
-  2. Total deployed ports  → SUM(total_ports_count)
-  3. Ports by locality and period  → SUM(total_ports_count) WHERE localities = ? AND (start_date, end_date)
+  1. Total deployed ports  → SUM(contractor_service.address.ports_count)
+  2. Ports by locality and period  → SUM(contractor_service.address.ports_count) WHERE locality = ? AND status_date_time range
+  3. Ports by month  → grouped by month
+  4. Ports by locality  → grouped by locality
+  5. Delivered addresses  → list with delivery dates
 """
 import logging
 import json
@@ -14,7 +16,6 @@ from app.cache import cache_get, cache_set
 from app.config import settings
 from app.prompts.analytics_prompts import (
     INTENT_DETECTION,
-    format_total_amount_prompt,
     format_total_ports_prompt,
     format_ports_by_locality_period_prompt,
 )
@@ -23,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 
 class AnalyticsIntent(str, Enum):
-    TOTAL_AMOUNT = "total_amount"
     TOTAL_PORTS  = "total_ports"
     PORTS_BY_LOCALITY_PERIOD = "ports_by_locality_period"
     PORTS_BY_MONTH = "ports_by_month"
@@ -80,17 +80,6 @@ async def detect_analytics_intent(question: str) -> tuple[AnalyticsIntent, Optio
     except Exception as exc:
         logger.error("Intent detection failed: %s", exc)
         return AnalyticsIntent.NONE, None
-
-
-async def get_total_amount() -> float:
-    cached = cache_get("total_amount")
-    if cached is not None:
-        logger.info("Cache hit: total_amount")
-        return cached
-    from app.database import fetch_total_contract_amount
-    value = await fetch_total_contract_amount()
-    cache_set("total_amount", value, settings.cache_ttl_seconds)
-    return value
 
 
 async def get_total_ports() -> int:
@@ -245,9 +234,7 @@ async def _format_analytics_response(intent: AnalyticsIntent, result: any, param
     
     llm = _build_llm(streaming=False)
     
-    if intent == AnalyticsIntent.TOTAL_AMOUNT:
-        prompt = format_total_amount_prompt(result)
-    elif intent == AnalyticsIntent.TOTAL_PORTS:
+    if intent == AnalyticsIntent.TOTAL_PORTS:
         prompt = format_total_ports_prompt(result)
     elif intent == AnalyticsIntent.PORTS_BY_LOCALITY_PERIOD:
         locality = parameters.get("locality") if parameters else None
@@ -279,12 +266,11 @@ async def resolve_analytics(intent: AnalyticsIntent, parameters: Optional[dict] 
 
     if intent == AnalyticsIntent.UNSUPPORTED:
         return (
-            "**Этот MVP поддерживает только три аналитических запроса:**\n\n"
-            "- Общая стоимость контракта\n"
+            "**Этот MVP поддерживает следующие аналитические запросы:**\n\n"
             "- Всего развернутых портов\n"
-            "- Количество портов по городу и периоду\n\n"
-            "- Количество портов по месяцам\n\n"
-            "- Количество портов по городам\n\n"
+            "- Количество портов по городу и периоду\n"
+            "- Количество портов по месяцам\n"
+            "- Количество портов по городам\n"
             "- Сданные адреса\n\n"
             "Пожалуйста, задайте один из этих вопросов или спросите о документации."
         )
@@ -298,10 +284,6 @@ async def resolve_analytics(intent: AnalyticsIntent, parameters: Optional[dict] 
         )
 
     try:
-        if intent == AnalyticsIntent.TOTAL_AMOUNT:
-            amount = await get_total_amount()
-            return await _format_analytics_response(intent, amount)
-        
         if intent == AnalyticsIntent.TOTAL_PORTS:
             ports = await get_total_ports()
             return await _format_analytics_response(intent, ports)

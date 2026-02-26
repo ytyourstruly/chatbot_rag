@@ -72,21 +72,28 @@ def get_pool() -> asyncpg.Pool:
 # Hardcoded, injection-safe analytics queries
 # ---------------------------------------------------------------------------
 
-_SQL_TOTAL_AMOUNT = """SELECT SUM(amount) FROM contractor_service.order;"""
-
-
-_SQL_TOTAL_PORTS  = """SELECT SUM(contractor_service.address.ports_count) FROM contractor_service.address
-JOIN contractor_service.address_smr_status_history
-ON contractor_service.address.id=contractor_service.address_smr_status_history.address_id
-WHERE contractor_service.address.smr_status='CONNECTION_ALLOWED';"""
+_SQL_TOTAL_PORTS  = """
+SELECT SUM(a.ports_count) AS ports
+FROM contractor_service.address a
+JOIN contractor_service.network_design_address n
+  ON n.address_id = a.id
+WHERE a.smr_status = 'CONNECTION_ALLOWED'
+  AND n.excluded = 'false';
+"""
 _SQL_PORTS_BY_LOCALITY_PERIOD = """
-SELECT SUM(contractor_service.address.ports_count) FROM contractor_service.address
-JOIN contractor_service.address_smr_status_history
-ON contractor_service.address.id=contractor_service.address_smr_status_history.address_id
-WHERE contractor_service.address.smr_status='CONNECTION_ALLOWED' 
-AND contractor_service.address.locality=$1
-AND contractor_service.address_smr_status_history.status_date_time >= $2::date     
-AND contractor_service.address_smr_status_history.status_date_time <= $3::date;
+SELECT SUM(a.ports_count) AS ports
+FROM contractor_service.address a
+JOIN contractor_service.address_smr_status_history h
+  ON a.id = h.address_id
+JOIN contractor_service.network_design_address n
+  ON n.address_id = a.id
+WHERE a.smr_status = 'CONNECTION_ALLOWED'
+  AND a.locality = $1
+  AND h.status_date_time >= $2::date
+  AND h.status_date_time <= $3::date
+  AND h.status_id = '3'
+  AND n.excluded = 'false'
+  AND h.status_date_time IS NOT null;
 """
 _SQL_PORTS_BY_MONTH = """
 SELECT
@@ -95,8 +102,12 @@ SELECT
 FROM contractor_service.address a
 JOIN contractor_service.address_smr_status_history h
   ON a.id = h.address_id
+JOIN contractor_service.network_design_address n
+  ON n.address_id = a.id
 WHERE a.smr_status = 'CONNECTION_ALLOWED'
   AND h.status_date_time IS NOT NULL
+  AND h.status_id = '3'
+  AND n.excluded = 'false'
 GROUP BY 1
 ORDER BY 1;
 """
@@ -108,10 +119,14 @@ SELECT
 FROM contractor_service.address a
 JOIN contractor_service.address_smr_status_history h
   ON a.id = h.address_id
+JOIN contractor_service.network_design_address n
+  ON n.address_id = a.id
 WHERE a.smr_status = 'CONNECTION_ALLOWED'
   AND h.status_date_time IS NOT NULL
+  AND h.status_id = '3'
   AND a.locality IS NOT NULL
   AND btrim(a.locality) <> ''
+  AND n.excluded = 'false'
 GROUP BY 1
 ORDER BY ports DESC;
 """
@@ -125,17 +140,15 @@ SELECT
 FROM contractor_service.address a
 JOIN contractor_service.address_smr_status_history h
   ON a.id = h.address_id
+JOIN contractor_service.network_design_address n
+  ON n.address_id = a.id
 WHERE a.smr_status = 'CONNECTION_ALLOWED'
   AND h.status_date_time IS NOT NULL
+  AND h.status_id = '3'
+  AND n.excluded = 'false'
 GROUP BY a.id, a.name, a.locality, a.ports_count
 ORDER BY delivered_at DESC;
 """
-
-async def fetch_total_contract_amount() -> float:
-    async with get_pool().acquire() as conn:
-        result = await conn.fetchval(_SQL_TOTAL_AMOUNT)
-    return float(result) if result is not None else 0.0
-
 
 async def fetch_total_ports() -> int:
     async with get_pool().acquire() as conn:
