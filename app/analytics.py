@@ -69,8 +69,8 @@ async def detect_analytics_intent(question: str) -> tuple[AnalyticsIntent, Optio
         except ValueError:
             intent = AnalyticsIntent.NONE
         
-        # Return parameters only for supported intents
-        if intent in (AnalyticsIntent.PORTS_BY_LOCALITY_PERIOD, AnalyticsIntent.PORTS_BY_MONTH):
+        # Return parameters only for intents that need them
+        if intent in (AnalyticsIntent.PORTS_BY_LOCALITY_PERIOD, AnalyticsIntent.PORTS_BY_LOCALITY):
             return intent, parameters or {}
         
         return intent, {}
@@ -175,10 +175,23 @@ def _format_ports_by_month_markdown(rows: list[dict]) -> str:
     lines += ["", f"**Итого:** {total}"]
     return "\n".join(lines)
 
-def _format_ports_by_locality_markdown(rows: list[dict], limit: int = 50) -> str:
+def _format_ports_by_locality_markdown(rows: list[dict], limit: int = 50, locality: Optional[str] = None) -> str:
     if not rows:
         return "**Данных нет.**"
 
+    # Single locality view (one row)
+    if locality and len(rows) == 1:
+        r = rows[0]
+        p = int(r["ports"] or 0)
+        loc = str(r["locality"])
+        return (
+            f"**Сданные порты в городе {loc}:**\n\n"
+            f"| Населённый пункт | Порты |\n"
+            f"|---|---:|\n"
+            f"| {loc} | {p} |\n"
+        )
+    
+    # Multiple localities view (table)
     lines = [
         "**Сданные порты в разрезе городов и сел:**",
         "",
@@ -239,15 +252,31 @@ def _format_objects_status_markdown(status: dict) -> str:
     
     return "\n".join(lines)
 
-async def get_ports_by_locality() -> list[dict]:
-    cache_key = "ports_by_locality"
+async def get_ports_by_locality(locality: Optional[str] = None) -> list[dict]:
+    """
+    Fetch ports by locality. Can return all localities or filter by specific locality.
+    
+    Args:
+        locality: Optional city name to filter by single locality, or None for all localities
+    
+    Returns:
+        List of dicts with locality and ports count
+    """
+    cache_key = f"ports_by_locality_{locality}" if locality else "ports_by_locality"
     cached = cache_get(cache_key)
     if cached is not None:
         logger.info("Cache hit: %s", cache_key)
         return cached
 
     from app.database import fetch_ports_by_locality
-    value = await fetch_ports_by_locality()
+    all_rows = await fetch_ports_by_locality()
+    
+    # Filter by locality if specified
+    if locality:
+        value = [r for r in all_rows if r.get("locality") == locality]
+    else:
+        value = all_rows
+    
     cache_set(cache_key, value, settings.cache_ttl_seconds)
     return value
 
@@ -364,22 +393,34 @@ async def resolve_analytics(intent: AnalyticsIntent, parameters: Optional[dict] 
         
         if intent == AnalyticsIntent.PORTS_BY_LOCALITY:
             try:
-                rows = await get_ports_by_locality()
+                # Extract optional locality parameter
+                locality = parameters.get("locality") if parameters else None
+                rows = await get_ports_by_locality(locality)
+                
                 if not rows:
-                    return (
-                        "**Данные по городам не найдены.**\n\n"
-                        "В базе данных нет информации о портах по городам. "
-                        "Проверьте, пожалуйста:\n"
-                        "- Заполнены ли названия городов (locality) в адресах?\n"
-                        "- Есть ли адреса со статусом 'CONNECTION_ALLOWED'?"
-                    )
-                return _format_ports_by_locality_markdown(rows)
+                    if locality:
+                        return (
+                            f"**Данные для города '{locality}' не найдены.**\n\n"
+                            "В базе данных нет информации о портах в этом городе. "
+                            "Проверьте, пожалуйста:\n"
+                            f"- Верно ли написано название города '{locality}'?\n"
+                            "- Есть ли адреса в этом городе со статусом 'CONNECTION_ALLOWED'?"
+                        )
+                    else:
+                        return (
+                            "**Данные по городам не найдены.**\n\n"
+                            "В базе данных нет информации о портах по городам. "
+                            "Проверьте, пожалуйста:\n"
+                            "- Заполнены ли названия городов (locality) в адресах?\n"
+                            "- Есть ли адреса со статусом 'CONNECTION_ALLOWED'?"
+                        )
+                return _format_ports_by_locality_markdown(rows, locality=locality)
             except Exception as exc:
                 logger.error("Failed to fetch ports by locality: %s", exc)
                 return (
                     "**Не удалось получить данные по городам.**\n\n"
                     "Возможно вопрос неточен. Вы имели в виду:\n"
-                    "- Портов в конкретном городе за период?\n"
+                    "- Портов в конкретном городе за период (укажите даты)?\n"
                     "- Статус проекта (сдано, в работе, исключено)?\n"
                     "- Сданные адреса в определённом городе?"
                 )
@@ -430,7 +471,7 @@ async def resolve_analytics(intent: AnalyticsIntent, parameters: Optional[dict] 
                 )
                 
         if intent == AnalyticsIntent.PORTS_BY_LOCALITY_PERIOD:
-            if not parameters:
+            if not parameters.get("locality") or not parameters.get("start_date") or not parameters.get("end_date"):
                 return (
                     "**Ошибка:** Не удалось извлечь параметры из вопроса.\n\n"
                     "Пожалуйста, уточните:\n"
@@ -477,7 +518,7 @@ async def resolve_analytics(intent: AnalyticsIntent, parameters: Optional[dict] 
             except Exception as exc:
                 logger.error("Failed to fetch ports by locality/period: %s", exc)
                 return (
-                    f"**Не удалось получить данные для города '{locality}'.**\n\n"
+                    f"**Не удалось получить данные для города {locality}.**\n\n"
                     "Возможные причины:\n"
                     "- Город не найден в базе данных\n"
                     "- Неверный формат даты\n"
