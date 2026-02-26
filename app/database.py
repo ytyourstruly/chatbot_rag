@@ -116,6 +116,21 @@ GROUP BY 1
 ORDER BY ports DESC;
 """
 
+_SQL_DELIVERED_ADDRESSES = """
+SELECT
+  a.name AS address_name,
+  a.locality,
+  a.ports_count,
+  MIN(h.status_date_time) AS delivered_at
+FROM contractor_service.address a
+JOIN contractor_service.address_smr_status_history h
+  ON a.id = h.address_id
+WHERE a.smr_status = 'CONNECTION_ALLOWED'
+  AND h.status_date_time IS NOT NULL
+GROUP BY a.id, a.name, a.locality, a.ports_count
+ORDER BY delivered_at DESC;
+"""
+
 async def fetch_total_contract_amount() -> float:
     async with get_pool().acquire() as conn:
         result = await conn.fetchval(_SQL_TOTAL_AMOUNT)
@@ -158,3 +173,16 @@ async def fetch_ports_by_locality() -> list[dict]:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(_SQL_PORTS_BY_LOCALITY)
     return [{"locality": r["locality"], "ports": int(r["ports"] or 0)} for r in rows]
+
+async def fetch_delivered_addresses():
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(_SQL_DELIVERED_ADDRESSES)
+    return [
+        {
+            "address": r["address_name"],
+            "locality": r["locality"],
+            "ports": int(r["ports_count"] or 0),
+            "delivered_at": r["delivered_at"],
+        }
+        for r in rows
+    ]
