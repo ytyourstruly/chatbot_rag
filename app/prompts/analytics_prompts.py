@@ -1,106 +1,299 @@
 """
 app/prompts/analytics_prompts.py — Prompts for analytics intent detection and response formatting.
+
+Intent schema (v2)
+──────────────────
+The three old intents ports_by_locality_period / ports_by_month / ports_by_locality
+have been merged into a single "ports" intent.  The LLM now returns:
+
+  {
+    "intent": "ports",
+    "parameters": {
+      "locality": "<city in Russian>  | null",
+      "months":   ["YYYY-MM", …]      | null,
+      "group_by": "none" | "locality" | "month" | "both"
+    }
+  }
+
+"delivered_addresses" now accepts optional filters:
+  {
+    "intent": "delivered_addresses",
+    "parameters": {
+      "locality":       "<city in Russian> | null",
+      "months":         ["YYYY-MM", …]     | null,
+      "address_search": "<partial street + number> | null"
+    }
+  }
+
+group_by semantics
+  "none"     -> scalar total (optionally filtered by locality / months)
+  "locality" -> list grouped by city      (optionally filtered)
+  "month"    -> list grouped by month     (optionally filtered)
+  "both"     -> list grouped by city AND month
+
+Mapping from user questions -- ports
+  "всего портов"                             -> total_ports  (unchanged)
+  "портов в феврале в Астане"                -> ports  locality=Астана months=[2026-02] group_by=none
+  "портов в феврале"                         -> ports  months=[2026-02]                group_by=none
+  "портов в феврале по городам"              -> ports  months=[2026-02]                group_by=locality
+  "портов по городам за январь и февраль"   -> ports  months=[2026-01,2026-02]        group_by=locality
+  "портов по месяцам"                        -> ports  group_by=month
+  "портов по месяцам в Астане"               -> ports  locality=Астана                 group_by=month
+
+Mapping from user questions -- delivered_addresses
+  "сданные адреса по городу Астана"          -> delivered_addresses  locality=Астана
+  "сданные адреса за февраль"                -> delivered_addresses  months=[2026-02]
+  "дай статус по Сарайшык 4"                -> delivered_addresses  address_search="Сарайшык 4"
+  "адреса в Астане за январь"               -> delivered_addresses  locality=Астана months=[2026-01]
 """
 
 INTENT_DETECTION = """You are an analytics intent detector for a Kazakhstan telecom contractor platform.
-Analyze the following user question and determine what analytics query they are asking for.
+Analyse the user question and return a single JSON object describing what data they need.
 
-CRITICAL RULE: Date/time mentions are the PRIMARY DIFFERENTIATOR:
-- If ANY date/month/period/year is mentioned → ONLY consider "ports_by_locality_period"
-- If NO date/month/period/year is mentioned → use "ports_by_locality" (even if a single locality is mentioned)
+==========================================================
+AVAILABLE INTENTS
+==========================================================
 
-Available analytics queries:
-1. "total_ports" - Total deployed ports across all contracts (no parameters needed)
-2. "ports_by_locality_period" - **REQUIRES BOTH:** locality name AND date range (start_date/end_date)
-3. "ports_by_month" - Delivered ports grouped by month across ALL localities (no parameters needed)
-4. "ports_by_locality" - Delivered ports by city/locality (can be single locality or all; no date range needed)
-5. "delivered_addresses" - List of delivered addresses with names and dates (no parameters needed)
-6. "objects_status" - Project status by SMR: counts of delivered, in progress, excluded objects (no parameters needed)
+1. "total_ports"
+   Grand total of deployed ports across all addresses and all time.
+   No parameters needed.
+   Trigger: "всего", "итого", "общее количество портов", "сколько всего портов"
+
+2. "ports"
+   Flexible port-count query with optional filters and grouping.
+   Parameters:
+     locality  - Russian city name, or null
+     months    - list of "YYYY-MM" strings, or null
+     group_by  - one of: "none" | "locality" | "month" | "both"
+
+   group_by rules:
+     "none"     -> return a single number (filtered totals)
+     "locality" -> return a table broken down by city
+     "month"    -> return a table broken down by month
+     "both"     -> return a table broken down by city AND month
+
+3. "delivered_addresses"
+   List of delivered addresses, optionally filtered; or a status lookup for a
+   specific address (which may or may not be delivered yet).
+   Parameters:
+     locality       - Russian city name, or null
+     months         - list of "YYYY-MM" strings, or null
+     address_search - partial street name + optional number extracted from the
+                      question (e.g. "Сарайшык 4", "Степан Разин"), or null
+
+   Trigger: "сданные адреса", "список адресов", "адреса по городу X",
+            "адреса за [месяц]", "дай статус по [адресу]",
+            "какой статус у [адреса]", "статус адреса [название]"
+
+4. "objects_status"
+   Project status by SMR: counts of delivered / in-progress / excluded objects.
+   No parameters needed.
+   Trigger: "статус проекта", "статус по СМР", "сдано / в работе / исключено"
+
+5. "unsupported"
+   The question is analytics-related but cannot be answered by the above.
+
+6. "none"
+   Not an analytics question at all.
+
+==========================================================
+DECISION RULES  (apply in order)
+==========================================================
+
+R1. "всего" / "итого" / "общее" AND no city/period AND no address -> "total_ports"
+
+R2. Question mentions a specific street name, building, or address lookup
+    ("статус по", "дай статус", "какой статус у") -> "delivered_addresses"
+    Extract address_search from the street + optional number.
+    Also extract locality and months if mentioned.
+
+R3. Question mentions "сданные адреса" / "список адресов" / "адреса по" /
+    "адреса за" -> "delivered_addresses"
+    Extract locality and months if mentioned.
+
+R4. Question contains port-count keywords AND a date / month / period?
+    YES -> intent = "ports"
+    Extract months list and locality (if mentioned).
+    Set group_by:
+      - city mentioned + no "по городам"  -> "none"
+      - "по городам" or "по городу"       -> "locality"
+      - "по месяцам"                       -> "month"
+      - "по городам" AND "по месяцам"     -> "both"
+
+R5. No date/month, but locality mentioned WITHOUT "по месяцам" AND no address
+    -> intent = "ports", locality = <city>, months = null, group_by = "none"
+
+R6. "по городам" / "по городу" with no date -> intent = "ports", group_by = "locality"
+
+R7. "по месяцам" with no date -> intent = "ports", group_by = "month"
+
+R8. "статус проекта" / "статус по СМР" -> "objects_status"
+
+==========================================================
+PARAMETER EXTRACTION
+==========================================================
+
+MONTHS LIST - convert every mentioned month to "YYYY-MM":
+  - Single month with no year -> assume 2026
+  - Range "с X по Y месяц"   -> expand to every month in range
+  - "за январь и февраль"    -> ["2026-01", "2026-02"]
+  - No month mentioned       -> null
+
+MONTH MAPPING (2026):
+  Январь   -> 2026-01    Февраль  -> 2026-02    Март     -> 2026-03
+  Апрель   -> 2026-04    Май      -> 2026-05    Июнь     -> 2026-06
+  Июль     -> 2026-07    Август   -> 2026-08    Сентябрь -> 2026-09
+  Октябрь  -> 2026-10    Ноябрь   -> 2026-11    Декабрь  -> 2026-12
+
+LOCALITY - extract the Russian city name as-is (e.g. "Астана", "Алматы").
+  If no city is mentioned -> null.
+
+ADDRESS_SEARCH - extract the street name and optional building number.
+  Strip leading words like "по", "статус по", "адрес", "улица" that are not
+  part of the name itself. Keep the number if present.
+  Examples:
+    "дай статус по Сарайшык 4"         -> "Сарайшык 4"
+    "статус адреса Степан Разин 14/1"  -> "Степан Разин 14/1"
+    "что с Бекарыс 5/1"                -> "Бекарыс 5/1"
+  If no specific address is mentioned  -> null.
+
+==========================================================
+EXAMPLES
+==========================================================
+
+  "сколько всего портов?"
+  -> {{"intent":"total_ports","parameters":{{}}}}
+
+  "сколько портов в феврале в Астане?"
+  -> {{"intent":"ports","parameters":{{"locality":"Астана","months":["2026-02"],"group_by":"none"}}}}
+
+  "сколько портов в феврале?"
+  -> {{"intent":"ports","parameters":{{"locality":null,"months":["2026-02"],"group_by":"none"}}}}
+
+  "сколько портов в феврале по городам?"
+  -> {{"intent":"ports","parameters":{{"locality":null,"months":["2026-02"],"group_by":"locality"}}}}
+
+  "сколько портов по городам за январь и февраль?"
+  -> {{"intent":"ports","parameters":{{"locality":null,"months":["2026-01","2026-02"],"group_by":"locality"}}}}
+
+  "сколько портов по месяцам?"
+  -> {{"intent":"ports","parameters":{{"locality":null,"months":null,"group_by":"month"}}}}
+
+  "сколько портов по месяцам в Астане?"
+  -> {{"intent":"ports","parameters":{{"locality":"Астана","months":null,"group_by":"month"}}}}
+
+  "порты в Астане"
+  -> {{"intent":"ports","parameters":{{"locality":"Астана","months":null,"group_by":"none"}}}}
+
+  "порты по городам"
+  -> {{"intent":"ports","parameters":{{"locality":null,"months":null,"group_by":"locality"}}}}
+
+  "сданные адреса"
+  -> {{"intent":"delivered_addresses","parameters":{{"locality":null,"months":null,"address_search":null}}}}
+
+  "сданные адреса по городу Астана"
+  -> {{"intent":"delivered_addresses","parameters":{{"locality":"Астана","months":null,"address_search":null}}}}
+
+  "сданные адреса за февраль"
+  -> {{"intent":"delivered_addresses","parameters":{{"locality":null,"months":["2026-02"],"address_search":null}}}}
+
+  "адреса в Астане за январь"
+  -> {{"intent":"delivered_addresses","parameters":{{"locality":"Астана","months":["2026-01"],"address_search":null}}}}
+
+  "дай статус по Сарайшык 4"
+  -> {{"intent":"delivered_addresses","parameters":{{"locality":null,"months":null,"address_search":"Сарайшык 4"}}}}
+
+  "статус адреса Степан Разин 14/1"
+  -> {{"intent":"delivered_addresses","parameters":{{"locality":null,"months":null,"address_search":"Степан Разин 14/1"}}}}
+
+  "что с Бекарыс 5/1"
+  -> {{"intent":"delivered_addresses","parameters":{{"locality":null,"months":null,"address_search":"Бекарыс 5/1"}}}}
+
+  "статус проекта по СМР"
+  -> {{"intent":"objects_status","parameters":{{}}}}
+
+==========================================================
 
 User question: "{question}"
 
-DECISION RULES (apply in order):
-1. If question asks about "total" OR "всего" ports → intent "total_ports"
-2. If question mentions ANY date/month/period (e.g., "в январе", "за 2026", "с 1 по 28 февраля") → intent "ports_by_locality_period" (extract both locality and date range)
-3. If question asks for ports "by month" OR "по месяцам" → intent "ports_by_month"
-4. If question asks for ports "by city/locality" OR "по городам" without mentioning dates → intent "ports_by_locality"
-5. If question asks for ports in a SINGLE specific city WITHOUT dates (e.g., "порты в Астане") → intent "ports_by_locality" (with optional locality parameter)
-6. If question asks for "delivered addresses" OR "сданные адреса" → intent "delivered_addresses"
-7. If question asks for "project status" OR "статус проекта по СМР" → intent "objects_status"
+Return ONLY valid JSON matching this exact schema - no extra text:
 
-PARAMETER EXTRACTION:
-- For "ports_by_locality_period": MUST extract both locality and date range, or return intent "none" if dates are missing
-  - If only month name is given (e.g., "февраль", "в феврале"), auto-expand to full month range (e.g., 2026-02-01 to 2026-02-28)
-  - If year not specified, use current year (2026)
-  - If day not specified but month is, expand to full month (1st to last day)
-- For "ports_by_locality": Optionally extract locality (for single locality view) or omit (for all localities)
-- For all other intents: Set parameters to empty dict
-
-MONTH MAPPING (2026):
-- Январь / январе / январь → 2026-01-01 to 2026-01-31
-- Февраль / феврале / февраль → 2026-02-01 to 2026-02-28
-- Март / марте / март → 2026-03-01 to 2026-03-31
-- Апрель / апреле / апрель → 2026-04-01 to 2026-04-30
-- Май / мае / май → 2026-05-01 to 2026-05-31
-- Июнь / июне / июнь → 2026-06-01 to 2026-06-30
-- Июль / июле / июль → 2026-07-01 to 2026-07-31
-- Август / августе / август → 2026-08-01 to 2026-08-31
-- Сентябрь / сентябре / сентябрь → 2026-09-01 to 2026-09-30
-- Октябрь / октябре / октябрь → 2026-10-01 to 2026-10-31
-- Ноябрь / ноябре / ноябрь → 2026-11-01 to 2026-11-30
-- Декабрь / декабре / декабрь → 2026-12-01 to 2026-12-31
-
-DATE HANDLING:
-- If end date not specified but dates are mentioned, assume end = today or end of current month
-- If start date not specified but dates are mentioned, assume start = beginning of current year
-- Format all dates as YYYY-MM-DD
-
-Return a JSON response with exactly this format:
+For "ports":
 {{
-    "intent": "<intent_type>",
-    "parameters": {{
-        "locality": "<city name in Russian or null>",
-        "start_date": "<YYYY-MM-DD or null>",
-        "end_date": "<YYYY-MM-DD or null>"
-    }}
+  "intent": "ports",
+  "parameters": {{
+    "locality": "<city in Russian or null>",
+    "months":   ["YYYY-MM", ...] or null,
+    "group_by": "none" | "locality" | "month" | "both"
+  }}
 }}
 
-IMPORTANT CLARIFICATIONS:
-- "порты в Астане" (ports in Astana) WITHOUT dates → "ports_by_locality" with locality="Астана"
-- "порты в Астане в феврале" (ports in Astana in February) → "ports_by_locality_period" with locality="Астана", start_date="2026-02-01", end_date="2026-02-28"
-- "портов по городу Астана и периоду февраль" (ports by city Astana and period February) → "ports_by_locality_period" with locality="Астана", start_date="2026-02-01", end_date="2026-02-28"
-- "порты по городам" (ports by cities) → "ports_by_locality" with locality=null
-- "как много портов" (how many ports) → "total_ports"
+For "delivered_addresses":
+{{
+  "intent": "delivered_addresses",
+  "parameters": {{
+    "locality":       "<city in Russian or null>",
+    "months":         ["YYYY-MM", ...] or null,
+    "address_search": "<partial address or null>"
+  }}
+}}
 
-For unsupported queries, return intent "unsupported".
-For non-analytics questions, return intent "none".
-
-Only return valid JSON, no additional text."""
+For all other intents, parameters may be an empty object {{}}.
+"""
 
 
+# ---------------------------------------------------------------------------
+# SMR status -> human-readable Russian label
+# (mirrors SMR_STATUS_LABELS in database.py -- keep in sync)
+# ---------------------------------------------------------------------------
+
+SMR_STATUS_LABELS: dict[str, str] = {
+    "CONNECTION_ALLOWED": "сдан",
+    "SMR_COMPLETED":      "СМР завершён, ведутся работы по вводу в эксплуатацию",
+    "IN_PROGRESS":        "в работе (ведутся СМР)",
+    "NOT_STARTED":        "строительные работы не начаты",
+    "ON_CHECK":           "на проверке для подключения абонентов",
+}
+
+
+def smr_status_label(status: str) -> str:
+    """Return a Russian label for an smr_status value, falling back to the raw value."""
+    return SMR_STATUS_LABELS.get(status, status)
+
+
+# ---------------------------------------------------------------------------
+# Response-formatting prompts
+# ---------------------------------------------------------------------------
 
 def format_total_ports_prompt(ports: int) -> str:
-    """Prompt for formatting total deployed ports response."""
     return f"""You are a helpful analytics assistant for a Kazakhstan telecom contractor platform.
 Format the following total deployed ports result into a brief, informative response in Russian (Markdown format).
 Include the number and a short explanation of what it represents.
 Only answer with provided information.
-Always refer to ports as "порты" in Russian, not "портов" or other variations. Say "сдано" instead of "установлено" or "развернуто". Say it grammatically correct.
+Always refer to ports as "порты" in Russian. Say "сдано" instead of "установлено" or "развернуто". Be grammatically correct.
 Total deployed ports: {ports:,}
 
 Provide a concise, engaging response in Russian with proper Markdown formatting. Be unique and vary the phrasing."""
 
 
-def format_ports_by_locality_period_prompt(
-    locality: str, start_date: str, end_date: str, ports: int
+def format_ports_scalar_prompt(
+    ports: int,
+    locality: str | None,
+    months: list[str] | None,
 ) -> str:
-    """Prompt for formatting ports by locality and period response."""
+    """Prompt for a single filtered port-count result (group_by='none')."""
+    parts = []
+    if locality:
+        parts.append(f"Город: {locality}")
+    if months:
+        parts.append(f"Месяцы: {', '.join(months)}")
+    context = "\n".join(parts) if parts else "Фильтры: не применены"
     return f"""You are a helpful analytics assistant for a Kazakhstan telecom contractor platform.
-Format the following ports by locality and period result into a brief, informative response in Russian (Markdown format).
-Include the number, location, and time period. Only answer with provided information.
-Always refer to ports as "порты" in Russian, not "портов" or other variations. Say "сдано" instead of "установлено" or "развернуто". Say it grammatically correct.
-Locality: {locality}
-Period: {start_date} to {end_date}
-Total ports delivered: {ports:,}
+Format the following port-count result into a brief, informative response in Russian (Markdown format).
+Only answer with provided information.
+Always refer to ports as "порты". Say "сдано" instead of "установлено". Be grammatically correct.
 
-Provide a concise, engaging response in Russian with proper Markdown formatting. Be unique and vary the phrasing."""
+{context}
+Итого портов сдано: {ports:,}
+
+Provide a concise, engaging response in Russian with proper Markdown formatting. Vary the phrasing."""
