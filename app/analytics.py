@@ -166,11 +166,38 @@ def _format_ports_by_month_markdown(rows: list[dict]) -> str:
         "|---|---:|",
     ]
     total = 0
+    
+    # Month names in Russian
+    month_names = {
+        "01": "Январь",
+        "02": "Февраль",
+        "03": "Март",
+        "04": "Апрель",
+        "05": "Май",
+        "06": "Июнь",
+        "07": "Июль",
+        "08": "Август",
+        "09": "Сентябрь",
+        "10": "Октябрь",
+        "11": "Ноябрь",
+        "12": "Декабрь",
+    }
+    
     for r in rows:
-        m = r["month"]
+        m = r["month"]  # Format: "2026-02"
         p = int(r["ports"] or 0)
         total += p
-        lines.append(f"| {m} | {p} |")
+        
+        # Convert "2026-02" to "Февраль 2026"
+        if m and len(m) == 7 and m[4] == "-":
+            year = m[:4]
+            month_num = m[5:7]
+            month_name = month_names.get(month_num, m)
+            formatted_month = f"{month_name} {year}"
+        else:
+            formatted_month = m
+        
+        lines.append(f"| {formatted_month} | {p} |")
 
     lines += ["", f"**Итого:** {total}"]
     return "\n".join(lines)

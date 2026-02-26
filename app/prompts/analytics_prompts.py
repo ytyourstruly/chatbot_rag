@@ -30,8 +30,25 @@ DECISION RULES (apply in order):
 
 PARAMETER EXTRACTION:
 - For "ports_by_locality_period": MUST extract both locality and date range, or return intent "none" if dates are missing
+  - If only month name is given (e.g., "февраль", "в феврале"), auto-expand to full month range (e.g., 2026-02-01 to 2026-02-28)
+  - If year not specified, use current year (2026)
+  - If day not specified but month is, expand to full month (1st to last day)
 - For "ports_by_locality": Optionally extract locality (for single locality view) or omit (for all localities)
 - For all other intents: Set parameters to empty dict
+
+MONTH MAPPING (2026):
+- Январь / январе / январь → 2026-01-01 to 2026-01-31
+- Февраль / феврале / февраль → 2026-02-01 to 2026-02-28
+- Март / марте / март → 2026-03-01 to 2026-03-31
+- Апрель / апреле / апрель → 2026-04-01 to 2026-04-30
+- Май / мае / май → 2026-05-01 to 2026-05-31
+- Июнь / июне / июнь → 2026-06-01 to 2026-06-30
+- Июль / июле / июль → 2026-07-01 to 2026-07-31
+- Август / августе / август → 2026-08-01 to 2026-08-31
+- Сентябрь / сентябре / сентябрь → 2026-09-01 to 2026-09-30
+- Октябрь / октябре / октябрь → 2026-10-01 to 2026-10-31
+- Ноябрь / ноябре / ноябрь → 2026-11-01 to 2026-11-30
+- Декабрь / декабре / декабрь → 2026-12-01 to 2026-12-31
 
 DATE HANDLING:
 - If end date not specified but dates are mentioned, assume end = today or end of current month
@@ -50,7 +67,8 @@ Return a JSON response with exactly this format:
 
 IMPORTANT CLARIFICATIONS:
 - "порты в Астане" (ports in Astana) WITHOUT dates → "ports_by_locality" with locality="Астана"
-- "порты в Астане в феврале" (ports in Astana in February) → "ports_by_locality_period" with dates
+- "порты в Астане в феврале" (ports in Astana in February) → "ports_by_locality_period" with locality="Астана", start_date="2026-02-01", end_date="2026-02-28"
+- "портов по городу Астана и периоду февраль" (ports by city Astana and period February) → "ports_by_locality_period" with locality="Астана", start_date="2026-02-01", end_date="2026-02-28"
 - "порты по городам" (ports by cities) → "ports_by_locality" with locality=null
 - "как много портов" (how many ports) → "total_ports"
 
