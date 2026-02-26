@@ -11,6 +11,7 @@ Available analytics queries:
 3. "ports_by_month" - Delivered ports grouped by month (based on status_date_time), across ALL localities
 4. "ports_by_locality" - Delivered ports grouped by locality (cities/villages), across all time
 5. "delivered_addresses" - List of delivered addresses (with name and delivery date)
+6. "objects_status" - Project status by SMR: count of delivered, in progress, and excluded objects
 
 User question: "{question}"
 
@@ -32,6 +33,7 @@ Return a JSON response with exactly this format:
 
 For intent type 1, set parameters to empty dict or with all nulls.
 For intent type 2, extract locality name and date range from the question, including the whole month.
+For intent types 3-6, set parameters to empty dict or with all nulls.
 For unsupported queries, return intent "unsupported" with null parameters.
 For non-analytics questions, return intent "none" with null parameters.
 
@@ -45,6 +47,7 @@ def format_total_ports_prompt(ports: int) -> str:
 Format the following total deployed ports result into a brief, informative response in Russian (Markdown format).
 Include the number and a short explanation of what it represents.
 Only answer with provided information.
+Always refer to ports as "порты" in Russian, not "портов" or other variations. Say "сдано" instead of "установлено" or "развернуто". Say it grammatically correct.
 Total deployed ports: {ports:,}
 
 Provide a concise, engaging response in Russian with proper Markdown formatting. Be unique and vary the phrasing."""
@@ -57,7 +60,7 @@ def format_ports_by_locality_period_prompt(
     return f"""You are a helpful analytics assistant for a Kazakhstan telecom contractor platform.
 Format the following ports by locality and period result into a brief, informative response in Russian (Markdown format).
 Include the number, location, and time period. Only answer with provided information.
-Always refer to ports as "порты" in Russian, not "портов" or other variations. Say "сдано" instead of "установлено" or "доставлено".
+Always refer to ports as "порты" in Russian, not "портов" or other variations. Say "сдано" instead of "установлено" or "развернуто". Say it grammatically correct.
 Locality: {locality}
 Period: {start_date} to {end_date}
 Total ports delivered: {ports:,}

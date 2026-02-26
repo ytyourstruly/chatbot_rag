@@ -29,6 +29,7 @@ class AnalyticsIntent(str, Enum):
     PORTS_BY_MONTH = "ports_by_month"
     PORTS_BY_LOCALITY = "ports_by_locality"
     DELIVERED_ADDRESSES = "delivered_addresses"
+    OBJECTS_STATUS = "objects_status"
     UNSUPPORTED  = "unsupported"
     NONE         = "none"
 
@@ -142,6 +143,18 @@ async def get_delivered_addresses():
     cache_set(cache_key, value, settings.cache_ttl_seconds)
     return value
 
+async def get_objects_status() -> dict:
+    cache_key = "objects_status"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        logger.info("Cache hit: %s", cache_key)
+        return cached
+
+    from app.database import fetch_objects_status
+    value = await fetch_objects_status()
+    cache_set(cache_key, value, settings.cache_ttl_seconds)
+    return value
+
 def _format_ports_by_month_markdown(rows: list[dict]) -> str:
     if not rows:
         return "**Данных нет.**"
@@ -206,6 +219,26 @@ def _format_delivered_addresses(rows: list[dict], limit: int = 50) -> str:
 
     return "\n".join(lines)
 
+def _format_objects_status_markdown(status: dict) -> str:
+    """Format project status by SMR as markdown table."""
+    delivered = status.get("delivered", 0)
+    in_progress = status.get("in_progress", 0)
+    excluded = status.get("excluded", 0)
+    total = delivered + in_progress + excluded
+    
+    lines = [
+        "**Статус проекта по СМР:**",
+        "",
+        "| Статус | Объекты |",
+        "|---|---:|",
+        f"| Сдано | {delivered} |",
+        f"| В работе | {in_progress} |",
+        f"| Исключено | {excluded} |",
+        f"| **Всего** | **{total}** |",
+    ]
+    
+    return "\n".join(lines)
+
 async def get_ports_by_locality() -> list[dict]:
     cache_key = "ports_by_locality"
     cached = cache_get(cache_key)
@@ -256,7 +289,7 @@ async def _format_analytics_response(intent: AnalyticsIntent, result: any, param
 async def resolve_analytics(intent: AnalyticsIntent, parameters: Optional[dict] = None) -> str:
     """
     Execute the analytics query and return an LLM-formatted response.
-    Handles DB unavailability gracefully.
+    Handles DB unavailability gracefully with clarifying questions.
     
     Args:
         intent: The detected analytics intent
@@ -271,7 +304,8 @@ async def resolve_analytics(intent: AnalyticsIntent, parameters: Optional[dict] 
             "- Количество портов по городу и периоду\n"
             "- Количество портов по месяцам\n"
             "- Количество портов по городам\n"
-            "- Сданные адреса\n\n"
+            "- Сданные адреса\n"
+            "- Статус проекта по СМР (сдано, в работе, исключено)\n\n"
             "Пожалуйста, задайте один из этих вопросов или спросите о документации."
         )
 
@@ -285,44 +319,181 @@ async def resolve_analytics(intent: AnalyticsIntent, parameters: Optional[dict] 
 
     try:
         if intent == AnalyticsIntent.TOTAL_PORTS:
-            ports = await get_total_ports()
-            return await _format_analytics_response(intent, ports)
+            try:
+                ports = await get_total_ports()
+                if ports == 0:
+                    return (
+                        "**Данные не найдены.**\n\n"
+                        "Не найдено развёрнутых портов в базе данных. "
+                        "Проверьте, пожалуйста:\n"
+                        "- Есть ли адреса со статусом 'CONNECTION_ALLOWED'?\n"
+                        "- Включены ли они в сетевой дизайн (not excluded)?"
+                    )
+                return await _format_analytics_response(intent, ports)
+            except Exception as exc:
+                logger.error("Failed to fetch total ports: %s", exc)
+                return (
+                    "**Не удалось получить данные по портам.**\n\n"
+                    "Возможно вопрос неточен. Вы имели в виду:\n"
+                    "- Сколько портов в каждом месяце?\n"
+                    "- Сколько портов в каждом городе?\n"
+                    "- Сколько портов сдано в конкретном городе и периоде?"
+                )
 
         if intent == AnalyticsIntent.PORTS_BY_MONTH:
-            rows = await get_ports_by_month()
-            return _format_ports_by_month_markdown(rows)
+            try:
+                rows = await get_ports_by_month()
+                if not rows:
+                    return (
+                        "**Данные по месяцам не найдены.**\n\n"
+                        "В базе данных нет информации о портах по месяцам. "
+                        "Проверьте, пожалуйста:\n"
+                        "- Есть ли история статусов (status_date_time)?\n"
+                        "- Все ли адреса имеют статус 'CONNECTION_ALLOWED' и включены в дизайн?"
+                    )
+                return _format_ports_by_month_markdown(rows)
+            except Exception as exc:
+                logger.error("Failed to fetch ports by month: %s", exc)
+                return (
+                    "**Не удалось получить данные по месяцам.**\n\n"
+                    "Возможно вопрос неточен. Вы имели в виду:\n"
+                    "- Портов в определённом городе за месяц?\n"
+                    "- Общее количество портов?\n"
+                    "- Сданные адреса в конкретный период?"
+                )
         
         if intent == AnalyticsIntent.PORTS_BY_LOCALITY:
-            rows = await get_ports_by_locality()
-            return _format_ports_by_locality_markdown(rows)
+            try:
+                rows = await get_ports_by_locality()
+                if not rows:
+                    return (
+                        "**Данные по городам не найдены.**\n\n"
+                        "В базе данных нет информации о портах по городам. "
+                        "Проверьте, пожалуйста:\n"
+                        "- Заполнены ли названия городов (locality) в адресах?\n"
+                        "- Есть ли адреса со статусом 'CONNECTION_ALLOWED'?"
+                    )
+                return _format_ports_by_locality_markdown(rows)
+            except Exception as exc:
+                logger.error("Failed to fetch ports by locality: %s", exc)
+                return (
+                    "**Не удалось получить данные по городам.**\n\n"
+                    "Возможно вопрос неточен. Вы имели в виду:\n"
+                    "- Портов в конкретном городе за период?\n"
+                    "- Статус проекта (сдано, в работе, исключено)?\n"
+                    "- Сданные адреса в определённом городе?"
+                )
         
         if intent == AnalyticsIntent.DELIVERED_ADDRESSES:
-            rows = await get_delivered_addresses()
-            return _format_delivered_addresses(rows)
+            try:
+                rows = await get_delivered_addresses()
+                if not rows:
+                    return (
+                        "**Сданные адреса не найдены.**\n\n"
+                        "Нет информации о доставленных адресах. "
+                        "Проверьте, пожалуйста:\n"
+                        "- Есть ли адреса со статусом 'CONNECTION_ALLOWED'?\n"
+                        "- Заполнены ли даты статусов (status_date_time)?"
+                    )
+                return _format_delivered_addresses(rows)
+            except Exception as exc:
+                logger.error("Failed to fetch delivered addresses: %s", exc)
+                return (
+                    "**Не удалось получить список сданных адресов.**\n\n"
+                    "Возможно вопрос неточен. Вы имели в виду:\n"
+                    "- Портов в конкретном городе?\n"
+                    "- Портов в определённый период времени?\n"
+                    "- Статус проекта по СМР?"
+                )
+        
+        if intent == AnalyticsIntent.OBJECTS_STATUS:
+            try:
+                status = await get_objects_status()
+                total = status.get("delivered", 0) + status.get("in_progress", 0) + status.get("excluded", 0)
+                if total == 0:
+                    return (
+                        "**Статус объектов не определён.**\n\n"
+                        "В базе данных не найдено объектов. "
+                        "Проверьте, пожалуйста:\n"
+                        "- Есть ли адреса в сетевом дизайне (network_design_address)?\n"
+                        "- Корректны ли статусы адресов (smr_status)?"
+                    )
+                return _format_objects_status_markdown(status)
+            except Exception as exc:
+                logger.error("Failed to fetch objects status: %s", exc)
+                return (
+                    "**Не удалось получить статус проекта.**\n\n"
+                    "Возможно вопрос неточен. Вы имели в виду:\n"
+                    "- Сколько портов в целом?\n"
+                    "- Портов по городам?\n"
+                    "- Сданные адреса в определённый период?"
+                )
                 
         if intent == AnalyticsIntent.PORTS_BY_LOCALITY_PERIOD:
             if not parameters:
-                return "**Ошибка:** Не удалось извлечь параметры локальности и периода из вопроса."
+                return (
+                    "**Ошибка:** Не удалось извлечь параметры из вопроса.\n\n"
+                    "Пожалуйста, уточните:\n"
+                    "- Какой город (например, 'Астана')?\n"
+                    "- Какой период? (например, 'с 1 января по 28 февраля 2026')"
+                )
             
             locality = parameters.get("locality")
             start_date = parameters.get("start_date")
             end_date = parameters.get("end_date")
             
             if not all([locality, start_date, end_date]):
+                missing = []
+                if not locality:
+                    missing.append("город (locality)")
+                if not start_date:
+                    missing.append("дата начала (start_date)")
+                if not end_date:
+                    missing.append("дата окончания (end_date)")
+                
                 return (
-                    "**Ошибка:** Не удалось определить город и период. "
-                    "Пожалуйста, укажите явно город и диапазон дат (например, '2026-02-21' до '2026-08-20')."
+                    f"**Неполные параметры.**\n\n"
+                    f"Отсутствуют: {', '.join(missing)}.\n\n"
+                    "Пожалуйста, укажите явно:\n"
+                    f"- Город: {locality or '?'}\n"
+                    f"- Начало периода: {start_date or 'YYYY-MM-DD'}\n"
+                    f"- Окончание периода: {end_date or 'YYYY-MM-DD'}\n\n"
+                    "Пример: 'Порты в Астане с 1 января до 31 декабря 2026'"
                 )
             
-            ports = await get_ports_by_locality_period(locality, start_date, end_date)
-            return await _format_analytics_response(intent, ports, parameters)
+            try:
+                ports = await get_ports_by_locality_period(locality, start_date, end_date)
+                if ports == 0:
+                    return (
+                        f"**Данные не найдены.**\n\n"
+                        f"Для города '{locality}' в период {start_date} - {end_date} "
+                        f"не найдено портов.\n\n"
+                        "Проверьте, пожалуйста:\n"
+                        f"- Верно ли написано название города?\n"
+                        f"- Есть ли адреса в этом городе?\n"
+                        f"- Попадают ли они в указанный период?"
+                    )
+                return await _format_analytics_response(intent, ports, parameters)
+            except Exception as exc:
+                logger.error("Failed to fetch ports by locality/period: %s", exc)
+                return (
+                    f"**Не удалось получить данные для города '{locality}'.**\n\n"
+                    "Возможные причины:\n"
+                    "- Город не найден в базе данных\n"
+                    "- Неверный формат даты\n"
+                    "- Нет данных за этот период\n\n"
+                    "Пожалуйста, уточните:\n"
+                    "- Правильное название города\n"
+                    "- Точный диапазон дат"
+                )
     
     except Exception as exc:
-        logger.error("Analytics DB query failed: %s", exc)
+        logger.error("Analytics query failed: %s", exc)
         return (
-            "**Не удалось получить данные аналитики.**\n\n"
-            f"Ошибка базы данных: `{exc}`\n\n"
-            "Пожалуйста, проверьте параметры подключения PostgreSQL."
+            "**Неожиданная ошибка при выполнении аналитического запроса.**\n\n"
+            f"Ошибка: `{exc}`\n\n"
+            "Пожалуйста, повторите вопрос или попробуйте другой запрос. "
+            "Если проблема сохранится, проверьте подключение к базе данных."
         )
 
     return ""

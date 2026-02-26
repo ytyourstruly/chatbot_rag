@@ -150,6 +150,32 @@ GROUP BY a.id, a.name, a.locality, a.ports_count
 ORDER BY delivered_at DESC;
 """
 
+_SQL_OBJECTS_DELIVERED = """
+SELECT COUNT(*) AS count
+FROM contractor_service.address a
+JOIN contractor_service.network_design_address n
+  ON n.address_id = a.id
+WHERE a.smr_status = 'CONNECTION_ALLOWED'
+  AND n.excluded = 'false';
+"""
+
+_SQL_OBJECTS_IN_PROGRESS = """
+SELECT COUNT(*) AS count
+FROM contractor_service.address a
+JOIN contractor_service.network_design_address n
+  ON n.address_id = a.id
+WHERE (a.smr_status = 'ON_CHECK' OR a.smr_status = 'IN_PROGRESS')
+  AND n.excluded = 'false';
+"""
+
+_SQL_OBJECTS_EXCLUDED = """
+SELECT COUNT(*) AS count
+FROM contractor_service.address a
+JOIN contractor_service.network_design_address n
+  ON n.address_id = a.id
+WHERE n.excluded = 'true';
+"""
+
 async def fetch_total_ports() -> int:
     async with get_pool().acquire() as conn:
         result = await conn.fetchval(_SQL_TOTAL_PORTS)
@@ -199,3 +225,21 @@ async def fetch_delivered_addresses():
         }
         for r in rows
     ]
+
+async def fetch_objects_status() -> dict:
+    """
+    Fetch project status by SMR: delivered, in progress, excluded objects count.
+    
+    Returns:
+        Dict with 'delivered', 'in_progress', 'excluded' counts
+    """
+    async with get_pool().acquire() as conn:
+        delivered = await conn.fetchval(_SQL_OBJECTS_DELIVERED)
+        in_progress = await conn.fetchval(_SQL_OBJECTS_IN_PROGRESS)
+        excluded = await conn.fetchval(_SQL_OBJECTS_EXCLUDED)
+    
+    return {
+        "delivered": int(delivered) if delivered is not None else 0,
+        "in_progress": int(in_progress) if in_progress is not None else 0,
+        "excluded": int(excluded) if excluded is not None else 0,
+    }
