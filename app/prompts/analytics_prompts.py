@@ -9,6 +9,9 @@ Available analytics queries:
 1. "total_amount" - Total contract value (SUM of all contract amounts)
 2. "total_ports" - Total deployed ports across all contracts
 3. "ports_by_locality_period" - Number of ports delivered in a specific locality during a specific time period
+4. "ports_by_month" - Delivered ports grouped by month (based on status_date_time), across ALL localities
+5. "ports_by_locality" - Delivered ports grouped by locality (cities/villages), across all time
+
 
 User question: "{question}"
 
