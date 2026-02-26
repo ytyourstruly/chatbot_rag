@@ -75,6 +75,7 @@ IMPORTANT CLARIFICATIONS:
 For unsupported queries, return intent "unsupported".
 For non-analytics questions, return intent "none".
 
+
 Only return valid JSON, no additional text."""
 
 
@@ -85,7 +86,7 @@ def format_total_ports_prompt(ports: int) -> str:
 Format the following total deployed ports result into a brief, informative response in Russian (Markdown format).
 Include the number and a short explanation of what it represents.
 Only answer with provided information.
-Always refer to ports as "порты" in Russian, not "портов" or other variations. Say "сдано" instead of "установлено" or "развернуто". Say it grammatically correct.
+Always refer to ports as "порты" in Russian, not "портов" or other variations. Say "сдано" instead of "установлено" or "развернуто". Say it grammatically correct in Russian.
 Total deployed ports: {ports:,}
 
 Provide a concise, engaging response in Russian with proper Markdown formatting. Be unique and vary the phrasing."""
@@ -98,7 +99,7 @@ def format_ports_by_locality_period_prompt(
     return f"""You are a helpful analytics assistant for a Kazakhstan telecom contractor platform.
 Format the following ports by locality and period result into a brief, informative response in Russian (Markdown format).
 Include the number, location, and time period. Only answer with provided information.
-Always refer to ports as "порты" in Russian, not "портов" or other variations. Say "сдано" instead of "установлено" or "развернуто". Say it grammatically correct.
+Always refer to ports as "порты" in Russian, not "портов" or other variations. Say "сдано" instead of "установлено" or "развернуто". Say it grammatically correct in Russian.
 Locality: {locality}
 Period: {start_date} to {end_date}
 Total ports delivered: {ports:,}

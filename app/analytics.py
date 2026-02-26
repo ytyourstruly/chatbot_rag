@@ -100,6 +100,8 @@ async def get_ports_by_locality_period(
     """
     Fetch total ports for a specific locality and date period.
     
+    This is the most granular query (most specific parameters).
+    
     Args:
         locality: City name (e.g., "Астана")
         start_date: Start date in YYYY-MM-DD format
@@ -119,15 +121,62 @@ async def get_ports_by_locality_period(
     cache_set(cache_key, value, settings.cache_ttl_seconds)
     return value
 
-async def get_ports_by_month() -> list[dict]:
-    cache_key = "ports_by_month"
+async def get_ports_by_month(locality: Optional[str] = None) -> list[dict]:
+    """
+    Fetch ports grouped by month across all localities (or filtered by locality).
+    
+    If locality is provided, uses PORTS_BY_LOCALITY_PERIOD to fetch
+    ports for each month in that locality.
+    
+    Args:
+        locality: Optional city name to filter by (filters the monthly breakdown)
+    
+    Returns:
+        List of dicts with 'month' and 'ports' keys
+    """
+    # Use cache key based on whether we're filtering by locality
+    cache_key = f"ports_by_month_{locality}" if locality else "ports_by_month"
     cached = cache_get(cache_key)
     if cached is not None:
         logger.info("Cache hit: %s", cache_key)
         return cached
 
     from app.database import fetch_ports_by_month
-    value = await fetch_ports_by_month()
+    
+    if locality is None:
+        # Get all months across all localities
+        value = await fetch_ports_by_month()
+    else:
+        # Filter by locality: fetch monthly data for specific city
+        # We need to query each month for this locality
+        all_months_data = await fetch_ports_by_month()
+        
+        # Build a mapping of months we have data for
+        months_to_query = []
+        for r in all_months_data:
+            month = r.get("month")
+            if month:
+                months_to_query.append(month)
+        
+        if not months_to_query:
+            value = []
+        else:
+            # Query each month/year for this specific locality
+            value = []
+            for month_str in months_to_query:  # Format: "2026-02"
+                try:
+                    year, month_num = month_str.split("-")
+                    start_date = f"{year}-{month_num}-01"
+                    # Calculate end date (last day of month)
+                    from calendar import monthrange
+                    last_day = monthrange(int(year), int(month_num))[1]
+                    end_date = f"{year}-{month_num}-{last_day:02d}"
+                    
+                    ports = await get_ports_by_locality_period(locality, start_date, end_date)
+                    value.append({"month": month_str, "ports": ports})
+                except Exception as e:
+                    logger.error(f"Failed to query month {month_str} for locality {locality}: {e}")
+    
     cache_set(cache_key, value, settings.cache_ttl_seconds)
     return value
 
@@ -279,16 +328,47 @@ def _format_objects_status_markdown(status: dict) -> str:
     
     return "\n".join(lines)
 
-async def get_ports_by_locality(locality: Optional[str] = None) -> list[dict]:
+async def get_ports_by_locality(locality: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None) -> list[dict]:
     """
     Fetch ports by locality. Can return all localities or filter by specific locality.
     
+    If start_date and end_date are provided, uses PORTS_BY_LOCALITY_PERIOD
+    to get accurate data for the time period. Otherwise, uses the default
+    all-time data from PORTS_BY_LOCALITY.
+    
     Args:
         locality: Optional city name to filter by single locality, or None for all localities
+        start_date: Optional start date in YYYY-MM-DD format (enables period filtering)
+        end_date: Optional end date in YYYY-MM-DD format (enables period filtering)
     
     Returns:
         List of dicts with locality and ports count
     """
+    # If date range is provided, use period-based query
+    if start_date and end_date:
+        if locality:
+            # Single locality + period: use PORTS_BY_LOCALITY_PERIOD
+            ports_count = await get_ports_by_locality_period(locality, start_date, end_date)
+            return [{"locality": locality, "ports": ports_count}]
+        else:
+            # All localities + period: need to get all localities then query each
+            all_localities_data = await get_ports_by_locality()
+            localities = [r.get("locality") for r in all_localities_data if r.get("locality")]
+            
+            value = []
+            for loc in localities:
+                try:
+                    ports = await get_ports_by_locality_period(loc, start_date, end_date)
+                    if ports > 0:
+                        value.append({"locality": loc, "ports": ports})
+                except Exception as e:
+                    logger.error(f"Failed to query locality {loc} for period {start_date}-{end_date}: {e}")
+            
+            # Sort by ports descending
+            value.sort(key=lambda x: x["ports"], reverse=True)
+            return value
+    
+    # No date range: use all-time locality data
     cache_key = f"ports_by_locality_{locality}" if locality else "ports_by_locality"
     cached = cache_get(cache_key)
     if cached is not None:
@@ -345,7 +425,13 @@ async def _format_analytics_response(intent: AnalyticsIntent, result: any, param
 async def resolve_analytics(intent: AnalyticsIntent, parameters: Optional[dict] = None) -> str:
     """
     Execute the analytics query and return an LLM-formatted response.
-    Handles DB unavailability gracefully with clarifying questions.
+    Uses a modular, hierarchical approach where functions call each other
+    to fill in missing information.
+    
+    Hierarchy:
+    1. PORTS_BY_LOCALITY_PERIOD (most specific: locality + dates)
+    2. PORTS_BY_LOCALITY (middle: locality only, or all localities + dates)
+    3. PORTS_BY_MONTH (high-level: months across all/specific locality)
     
     Args:
         intent: The detected analytics intent
@@ -396,17 +482,89 @@ async def resolve_analytics(intent: AnalyticsIntent, parameters: Optional[dict] 
                     "- Сколько портов сдано в конкретном городе и периоде?"
                 )
 
+        if intent == AnalyticsIntent.PORTS_BY_LOCALITY_PERIOD:
+            # Most specific query: requires both locality and date range
+            if not parameters or not parameters.get("locality") or not parameters.get("start_date") or not parameters.get("end_date"):
+                return (
+                    "**Ошибка:** Не удалось извлечь параметры из вопроса.\n\n"
+                    "Пожалуйста, уточните:\n"
+                    "- Какой город (например, 'Астана')?\n"
+                    "- Какой период? (например, 'с 1 января по 28 февраля 2026')"
+                )
+            
+            locality = parameters.get("locality")
+            start_date = parameters.get("start_date")
+            end_date = parameters.get("end_date")
+            
+            if not all([locality, start_date, end_date]):
+                missing = []
+                if not locality:
+                    missing.append("город (locality)")
+                if not start_date:
+                    missing.append("дата начала (start_date)")
+                if not end_date:
+                    missing.append("дата окончания (end_date)")
+                
+                return (
+                    f"**Неполные параметры.**\n\n"
+                    f"Отсутствуют: {', '.join(missing)}.\n\n"
+                    "Пожалуйста, укажите явно:\n"
+                    f"- Город: {locality or '?'}\n"
+                    f"- Начало периода: {start_date or 'YYYY-MM-DD'}\n"
+                    f"- Окончание периода: {end_date or 'YYYY-MM-DD'}\n\n"
+                    "Пример: 'Порты в Астане с 1 января до 31 декабря 2026'"
+                )
+            
+            try:
+                # Call the most specific function
+                ports = await get_ports_by_locality_period(locality, start_date, end_date)
+                if ports == 0:
+                    return (
+                        f"**Данные не найдены.**\n\n"
+                        f"Для города '{locality}' в период {start_date} - {end_date} "
+                        f"не найдено портов.\n\n"
+                        "Проверьте, пожалуйста:\n"
+                        f"- Верно ли написано название города?\n"
+                        f"- Есть ли адреса в этом городе?\n"
+                        f"- Попадают ли они в указанный период?"
+                    )
+                return await _format_analytics_response(intent, ports, parameters)
+            except Exception as exc:
+                logger.error("Failed to fetch ports by locality/period: %s", exc)
+                return (
+                    f"**Не удалось получить данные для города {locality}.**\n\n"
+                    "Возможные причины:\n"
+                    "- Город не найден в базе данных\n"
+                    "- Неверный формат даты\n"
+                    "- Нет данных за этот период\n\n"
+                    "Пожалуйста, уточните:\n"
+                    "- Правильное название города\n"
+                    "- Точный диапазон дат"
+                )
+
         if intent == AnalyticsIntent.PORTS_BY_MONTH:
             try:
-                rows = await get_ports_by_month()
+                # If locality is provided in parameters, filter by that locality
+                locality = parameters.get("locality") if parameters else None
+                rows = await get_ports_by_month(locality=locality)
+                
                 if not rows:
-                    return (
-                        "**Данные по месяцам не найдены.**\n\n"
-                        "В базе данных нет информации о портах по месяцам. "
-                        "Проверьте, пожалуйста:\n"
-                        "- Есть ли история статусов (status_date_time)?\n"
-                        "- Все ли адреса имеют статус 'CONNECTION_ALLOWED' и включены в дизайн?"
-                    )
+                    if locality:
+                        return (
+                            f"**Данные по месяцам для города '{locality}' не найдены.**\n\n"
+                            "В базе данных нет информации о портах по месяцам в этом городе. "
+                            "Проверьте, пожалуйста:\n"
+                            f"- Верно ли написано название города '{locality}'?\n"
+                            "- Есть ли адреса в этом городе со статусом 'CONNECTION_ALLOWED'?"
+                        )
+                    else:
+                        return (
+                            "**Данные по месяцам не найдены.**\n\n"
+                            "В базе данных нет информации о портах по месяцам. "
+                            "Проверьте, пожалуйста:\n"
+                            "- Есть ли история статусов (status_date_time)?\n"
+                            "- Все ли адреса имеют статус 'CONNECTION_ALLOWED' и включены в дизайн?"
+                        )
                 return _format_ports_by_month_markdown(rows)
             except Exception as exc:
                 logger.error("Failed to fetch ports by month: %s", exc)
@@ -420,9 +578,13 @@ async def resolve_analytics(intent: AnalyticsIntent, parameters: Optional[dict] 
         
         if intent == AnalyticsIntent.PORTS_BY_LOCALITY:
             try:
-                # Extract optional locality parameter
+                # Extract optional parameters
                 locality = parameters.get("locality") if parameters else None
-                rows = await get_ports_by_locality(locality)
+                start_date = parameters.get("start_date") if parameters else None
+                end_date = parameters.get("end_date") if parameters else None
+                
+                # Call with modular approach: if dates are provided, use them
+                rows = await get_ports_by_locality(locality=locality, start_date=start_date, end_date=end_date)
                 
                 if not rows:
                     if locality:
@@ -495,64 +657,6 @@ async def resolve_analytics(intent: AnalyticsIntent, parameters: Optional[dict] 
                     "- Сколько портов в целом?\n"
                     "- Портов по городам?\n"
                     "- Сданные адреса в определённый период?"
-                )
-                
-        if intent == AnalyticsIntent.PORTS_BY_LOCALITY_PERIOD:
-            if not parameters.get("locality") or not parameters.get("start_date") or not parameters.get("end_date"):
-                return (
-                    "**Ошибка:** Не удалось извлечь параметры из вопроса.\n\n"
-                    "Пожалуйста, уточните:\n"
-                    "- Какой город (например, 'Астана')?\n"
-                    "- Какой период? (например, 'с 1 января по 28 февраля 2026')"
-                )
-            
-            locality = parameters.get("locality")
-            start_date = parameters.get("start_date")
-            end_date = parameters.get("end_date")
-            
-            if not all([locality, start_date, end_date]):
-                missing = []
-                if not locality:
-                    missing.append("город (locality)")
-                if not start_date:
-                    missing.append("дата начала (start_date)")
-                if not end_date:
-                    missing.append("дата окончания (end_date)")
-                
-                return (
-                    f"**Неполные параметры.**\n\n"
-                    f"Отсутствуют: {', '.join(missing)}.\n\n"
-                    "Пожалуйста, укажите явно:\n"
-                    f"- Город: {locality or '?'}\n"
-                    f"- Начало периода: {start_date or 'YYYY-MM-DD'}\n"
-                    f"- Окончание периода: {end_date or 'YYYY-MM-DD'}\n\n"
-                    "Пример: 'Порты в Астане с 1 января до 31 декабря 2026'"
-                )
-            
-            try:
-                ports = await get_ports_by_locality_period(locality, start_date, end_date)
-                if ports == 0:
-                    return (
-                        f"**Данные не найдены.**\n\n"
-                        f"Для города '{locality}' в период {start_date} - {end_date} "
-                        f"не найдено портов.\n\n"
-                        "Проверьте, пожалуйста:\n"
-                        f"- Верно ли написано название города?\n"
-                        f"- Есть ли адреса в этом городе?\n"
-                        f"- Попадают ли они в указанный период?"
-                    )
-                return await _format_analytics_response(intent, ports, parameters)
-            except Exception as exc:
-                logger.error("Failed to fetch ports by locality/period: %s", exc)
-                return (
-                    f"**Не удалось получить данные для города {locality}.**\n\n"
-                    "Возможные причины:\n"
-                    "- Город не найден в базе данных\n"
-                    "- Неверный формат даты\n"
-                    "- Нет данных за этот период\n\n"
-                    "Пожалуйста, уточните:\n"
-                    "- Правильное название города\n"
-                    "- Точный диапазон дат"
                 )
     
     except Exception as exc:

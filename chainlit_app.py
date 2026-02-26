@@ -20,10 +20,11 @@ load_dotenv()
 
 import chainlit as cl
 from app.database import create_pool, close_pool
-from app.vector_store import load_vector_store
+# from app.vector_store import load_vector_store
 from app.chatbot import process_question
 from app.prompts.ui_prompts import WELCOME_MESSAGE
-
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 

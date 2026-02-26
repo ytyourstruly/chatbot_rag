@@ -1,69 +1,116 @@
 """
-app/database.py — Async PostgreSQL connection via asyncpg.
+app/database.py — Async PostgreSQL connection pool via asyncpg.
 
-Security rules:
-  - Read-only PostgreSQL role enforced at DB level.
-  - Only two hardcoded SQL statements are ever executed.
-  - No user input is passed to any query.
-  - 30-second statement timeout.
+Configuration:
+  - Connection details loaded from DATABASE_URL in .env
+  - Pool created on app startup in on_chat_start()
+  - Pool closed on app shutdown in on_chat_end()
+
+Security:
+  - Read-only PostgreSQL role enforced at DB level (enki_viewer)
+  - Only hardcoded, parameterized SQL statements executed
+  - No user input passed to any query
+  - Statement execution timeout: 30 seconds
+  - Connection pool timeout: 10 seconds
 
 Resilience:
-  - Pool creation failure is logged but does NOT crash the app.
-  - All callers check _pool before use; analytics gracefully disabled when DB
-    is unavailable.
+  - Pool creation failure is logged but does NOT crash the app
+  - All callers check is_db_available() before use
+  - Analytics queries gracefully disabled when database unavailable
+  - All DB operations wrapped in try/except with detailed logging
 """
 import asyncpg
 import logging
 from datetime import datetime
+from typing import Optional
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_pool: asyncpg.Pool | None = None
+_pool: Optional[asyncpg.Pool] = None
 
 
 async def create_pool() -> None:
     """
-    Create the asyncpg connection pool.
-    On failure (wrong host, wrong credentials, network issue) the error is
-    logged and _pool stays None — the app continues in RAG-only mode.
+    Create the asyncpg connection pool from DATABASE_URL.
+    
+    On failure, _pool stays None — the app continues in RAG-only mode.
     """
     global _pool
+    if _pool is not None:
+        logger.warning("Database pool already exists; skipping")
+        return
+    
     try:
+        logger.info(
+            "Creating PostgreSQL pool (max_size=%d, timeout=%ds)...",
+            settings.db_pool_max_size,
+            settings.db_connection_timeout,
+        )
         _pool = await asyncpg.create_pool(
             dsn=settings.database_url,
-            min_size=1,
-            max_size=10,
-            command_timeout=30,
+            min_size=settings.db_pool_min_size,
+            max_size=settings.db_pool_max_size,
+            command_timeout=settings.db_statement_timeout,
             statement_cache_size=0,
-            timeout=10,            # connection-attempt timeout in seconds
+            timeout=settings.db_connection_timeout,
         )
-        logger.info("PostgreSQL pool created successfully.")
+        logger.info(
+            "✓ PostgreSQL pool created (min=%d, max=%d)",
+            settings.db_pool_min_size,
+            settings.db_pool_max_size,
+        )
+    except asyncpg.InvalidDSNError as exc:
+        _pool = None
+        logger.error(
+            "✗ Invalid DATABASE_URL format: %s\nExpected: postgresql://user:pass@host:port/db",
+            exc,
+        )
+    except (OSError, asyncpg.PostgresError) as exc:
+        _pool = None
+        logger.error(
+            "✗ PostgreSQL connection failed — analytics disabled.\n"
+            "Check: DATABASE_URL, host/port reachable, credentials valid, database exists.\n"
+            "Error: %s",
+            exc,
+        )
     except Exception as exc:
         _pool = None
-        logger.warning(
-            "Could not connect to PostgreSQL — analytics will be disabled. "
-            "Reason: %s", exc
-        )
+        logger.exception("✗ Unexpected error creating pool: %s", exc)
 
 
 async def close_pool() -> None:
+    """
+    Close the PostgreSQL connection pool gracefully.
+    """
     global _pool
-    if _pool:
-        await _pool.close()
-        _pool = None
-        logger.info("PostgreSQL pool closed.")
+    if _pool is not None:
+        try:
+            await _pool.close()
+            logger.info("✓ PostgreSQL pool closed")
+        except Exception as exc:
+            logger.error("Error closing pool: %s", exc)
+        finally:
+            _pool = None
 
 
 def is_db_available() -> bool:
+    """
+    Check if PostgreSQL connection pool is available.
+    """
     return _pool is not None
 
 
 def get_pool() -> asyncpg.Pool:
+    """
+    Get the active PostgreSQL connection pool.
+    
+    Raises RuntimeError if pool not initialized.
+    """
     if _pool is None:
         raise RuntimeError(
-            "Database is not connected. Check DATABASE_URL in .env and ensure "
-            "PostgreSQL is reachable."
+            "❌ Database pool not available.\n"
+            "Check: DATABASE_URL in .env, PostgreSQL running, credentials valid."
         )
     return _pool
 
