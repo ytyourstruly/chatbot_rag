@@ -72,8 +72,13 @@ def get_pool() -> asyncpg.Pool:
 # Hardcoded, injection-safe analytics queries
 # ---------------------------------------------------------------------------
 
-_SQL_TOTAL_AMOUNT = "SELECT SUM(amount) FROM contractor_service.order;"
-_SQL_TOTAL_PORTS  = "SELECT SUM(total_ports_count) FROM contractor_service.order;"
+_SQL_TOTAL_AMOUNT = """SELECT SUM(amount) FROM contractor_service.order;"""
+
+
+_SQL_TOTAL_PORTS  = """SELECT SUM(contractor_service.address.ports_count) FROM contractor_service.address
+JOIN contractor_service.address_smr_status_history
+ON contractor_service.address.id=contractor_service.address_smr_status_history.address_id
+WHERE contractor_service.address.smr_status='CONNECTION_ALLOWED';"""
 _SQL_PORTS_BY_LOCALITY_PERIOD = """
 SELECT SUM(contractor_service.address.ports_count) FROM contractor_service.address
 JOIN contractor_service.address_smr_status_history

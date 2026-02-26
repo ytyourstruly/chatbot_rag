@@ -12,7 +12,9 @@ Available analytics queries:
 
 User question: "{question}"
 
-If the end date is not specified, assume the user wants data up to the current date, replacing null with the current date. If the start date is not specified, assume they want all historical data, replacing null with the earliest available date in the current year.
+If the end date is not specified, assume the user wants data up to the current date of the whole month, replacing null with the current date of the whole month. If the start date is not specified, assume they want all historical data, replacing null with the earliest available date in the current year.
+
+If the user specified one month, assume they want data for that whole month. For example, if they say "за январь 2024", interpret that as start_date = "2024-01-01" and end_date = "2024-01-31".
 
 Format the user question into one of the above intent types, and extract any parameters (locality, start_date, end_date) if applicable.
 
@@ -27,7 +29,7 @@ Return a JSON response with exactly this format:
 }}
 
 For intent types 1 and 2, set parameters to empty dict or with all nulls.
-For intent type 3, extract locality name and date range from the question.
+For intent type 3, extract locality name and date range from the question, including the whole month.
 For unsupported queries, return intent "unsupported" with null parameters.
 For non-analytics questions, return intent "none" with null parameters.
 
