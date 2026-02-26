@@ -343,7 +343,13 @@ def _build_addresses_query(
     ──────────
     locality            — filter to a specific city name
     months              — filter to a list of "YYYY-MM" strings
-    address_search      — partial address name; matched with ILIKE %term%
+    address_search      — partial address name; tokenised and matched with one
+                          ILIKE '%token%' clause per whitespace-separated token,
+                          all AND-ed together.
+                          This handles the DB format "улица Сарайшык, 4" when
+                          the user types "Сарайшык 4": each token ("Сарайшык",
+                          "4") is checked independently, so the comma in the
+                          stored name is irrelevant.
     include_all_statuses — when False (default) only rows with
                            smr_status = 'CONNECTION_ALLOWED' are returned;
                            when True the filter is omitted and smr_status is
@@ -395,11 +401,16 @@ def _build_addresses_query(
         idx += 1
 
     if address_search:
-        # Case-insensitive partial match on address name.
-        # The search term is passed as a parameter so it cannot cause injection.
-        where_clauses.append(f"a.name ILIKE ${idx}")
-        params.append(f"%{address_search}%")
-        idx += 1
+        # Split the search string into tokens and add one ILIKE clause per token,
+        # all AND-ed together.  This handles the mismatch between user input like
+        # "Сарайшык 4" and the DB value "улица Сарайшык, 4": each token is matched
+        # independently so punctuation in the stored name is irrelevant.
+        # Every token is a separate $N parameter — no string interpolation.
+        tokens = [t for t in address_search.split() if t]
+        for token in tokens:
+            where_clauses.append(f"a.name ILIKE ${idx}")
+            params.append(f"%{token}%")
+            idx += 1
 
     where_block = "\n  AND ".join(where_clauses)
 
