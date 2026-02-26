@@ -11,7 +11,7 @@ Available analytics queries:
 3. "ports_by_locality_period" - Number of ports delivered in a specific locality during a specific time period
 4. "ports_by_month" - Delivered ports grouped by month (based on status_date_time), across ALL localities
 5. "ports_by_locality" - Delivered ports grouped by locality (cities/villages), across all time
-
+6. "delivered_addresses" - List of delivered addresses (with name and delivery date)
 
 User question: "{question}"
 

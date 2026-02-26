@@ -28,6 +28,7 @@ class AnalyticsIntent(str, Enum):
     PORTS_BY_LOCALITY_PERIOD = "ports_by_locality_period"
     PORTS_BY_MONTH = "ports_by_month"
     PORTS_BY_LOCALITY = "ports_by_locality"
+    DELIVERED_ADDRESSES = "delivered_addresses"
     UNSUPPORTED  = "unsupported"
     NONE         = "none"
 
@@ -140,6 +141,18 @@ async def get_ports_by_month() -> list[dict]:
     cache_set(cache_key, value, settings.cache_ttl_seconds)
     return value
 
+async def get_delivered_addresses():
+    cache_key = "delivered_addresses"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        logger.info("Cache hit: %s", cache_key)
+        return cached
+
+    from app.database import fetch_delivered_addresses
+    value = await fetch_delivered_addresses()
+    cache_set(cache_key, value, settings.cache_ttl_seconds)
+    return value
+
 def _format_ports_by_month_markdown(rows: list[dict]) -> str:
     if not rows:
         return "**Данных нет.**"
@@ -181,6 +194,27 @@ def _format_ports_by_locality_markdown(rows: list[dict], limit: int = 50) -> str
         lines.append(f"\n_Показаны топ-{limit} по количеству портов._")
 
     lines += ["", f"**Итого (по показанным):** {total}"]
+    return "\n".join(lines)
+
+def _format_delivered_addresses(rows: list[dict], limit: int = 50) -> str:
+    if not rows:
+        return "**Сданных адресов не найдено.**"
+
+    lines = [
+        "**Сданные адреса:**",
+        "",
+        "| Адрес | Населённый пункт | Порты | Дата сдачи |",
+        "|---|---|---:|---|",
+    ]
+
+    for r in rows[:limit]:
+        lines.append(
+            f"| {r['address']} | {r['locality']} | {r['ports']} | {r['delivered_at'].date()} |"
+        )
+
+    if len(rows) > limit:
+        lines.append(f"\n_Показаны первые {limit} записей._")
+
     return "\n".join(lines)
 
 async def get_ports_by_locality() -> list[dict]:
@@ -251,6 +285,7 @@ async def resolve_analytics(intent: AnalyticsIntent, parameters: Optional[dict] 
             "- Количество портов по городу и периоду\n\n"
             "- Количество портов по месяцам\n\n"
             "- Количество портов по городам\n\n"
+            "- Сданные адреса\n\n"
             "Пожалуйста, задайте один из этих вопросов или спросите о документации."
         )
 
@@ -279,6 +314,10 @@ async def resolve_analytics(intent: AnalyticsIntent, parameters: Optional[dict] 
             rows = await get_ports_by_locality()
             return _format_ports_by_locality_markdown(rows)
         
+        if intent == AnalyticsIntent.DELIVERED_ADDRESSES:
+            rows = await get_delivered_addresses()
+            return _format_delivered_addresses(rows)
+                
         if intent == AnalyticsIntent.PORTS_BY_LOCALITY_PERIOD:
             if not parameters:
                 return "**Ошибка:** Не удалось извлечь параметры локальности и периода из вопроса."
