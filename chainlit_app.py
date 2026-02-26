@@ -32,7 +32,7 @@ async def on_chat_start():
     """Called once when a user opens a new chat session."""
     # Initialise DB pool and vector store for this process
     await create_pool()
-    load_vector_store()
+    # load_vector_store() #TODO: remove if needed from Dias the boss
 
     await cl.Message(
         content=WELCOME_MESSAGE

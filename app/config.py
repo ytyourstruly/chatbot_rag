@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     docs_path: str = "./docs"
     faiss_index_path: str = "./faiss_index"
     cache_ttl_seconds: int = 300
-    openai_model: str = "gpt-5-mini"
+    openai_model: str = "gpt-5.2-2025-12-11"
     embedding_model: str = "text-embedding-3-large"
     top_k_results: int = 3
     min_similarity_score: float = 0.75    # threshold for RAG confidence
