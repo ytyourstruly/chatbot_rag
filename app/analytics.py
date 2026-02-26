@@ -26,6 +26,8 @@ class AnalyticsIntent(str, Enum):
     TOTAL_AMOUNT = "total_amount"
     TOTAL_PORTS  = "total_ports"
     PORTS_BY_LOCALITY_PERIOD = "ports_by_locality_period"
+    PORTS_BY_MONTH = "ports_by_month"
+    PORTS_BY_LOCALITY = "ports_by_locality"
     UNSUPPORTED  = "unsupported"
     NONE         = "none"
 
@@ -66,11 +68,11 @@ async def detect_analytics_intent(question: str) -> tuple[AnalyticsIntent, Optio
             intent = AnalyticsIntent.NONE
         
         # Return parameters only for supported intents
-        if intent == AnalyticsIntent.PORTS_BY_LOCALITY_PERIOD:
-            return intent, parameters
+        if intent in (AnalyticsIntent.PORTS_BY_LOCALITY_PERIOD, AnalyticsIntent.PORTS_BY_MONTH):
+            return intent, parameters or {}
         
-        return intent, None
-        
+        return intent, {}
+
     except json.JSONDecodeError:
         logger.error("LLM returned invalid JSON for intent detection: %s", response_text)
         return AnalyticsIntent.NONE, None
@@ -126,6 +128,72 @@ async def get_ports_by_locality_period(
     cache_set(cache_key, value, settings.cache_ttl_seconds)
     return value
 
+async def get_ports_by_month() -> list[dict]:
+    cache_key = "ports_by_month"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        logger.info("Cache hit: %s", cache_key)
+        return cached
+
+    from app.database import fetch_ports_by_month
+    value = await fetch_ports_by_month()
+    cache_set(cache_key, value, settings.cache_ttl_seconds)
+    return value
+
+def _format_ports_by_month_markdown(rows: list[dict]) -> str:
+    if not rows:
+        return "**Данных нет.**"
+
+    lines = [
+        "**Сданные порты по месяцам:**",
+        "",
+        "| Месяц | Порты |",
+        "|---|---:|",
+    ]
+    total = 0
+    for r in rows:
+        m = r["month"]
+        p = int(r["ports"] or 0)
+        total += p
+        lines.append(f"| {m} | {p} |")
+
+    lines += ["", f"**Итого:** {total}"]
+    return "\n".join(lines)
+
+def _format_ports_by_locality_markdown(rows: list[dict], limit: int = 50) -> str:
+    if not rows:
+        return "**Данных нет.**"
+
+    lines = [
+        "**Сданные порты в разрезе городов и сел:**",
+        "",
+        "| Населённый пункт | Порты |",
+        "|---|---:|",
+    ]
+    total = 0
+    for r in rows[:limit]:
+        loc = str(r["locality"])
+        p = int(r["ports"] or 0)
+        total += p
+        lines.append(f"| {loc} | {p} |")
+
+    if len(rows) > limit:
+        lines.append(f"\n_Показаны топ-{limit} по количеству портов._")
+
+    lines += ["", f"**Итого (по показанным):** {total}"]
+    return "\n".join(lines)
+
+async def get_ports_by_locality() -> list[dict]:
+    cache_key = "ports_by_locality"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        logger.info("Cache hit: %s", cache_key)
+        return cached
+
+    from app.database import fetch_ports_by_locality
+    value = await fetch_ports_by_locality()
+    cache_set(cache_key, value, settings.cache_ttl_seconds)
+    return value
 
 async def _format_analytics_response(intent: AnalyticsIntent, result: any, parameters: Optional[dict] = None) -> str:
     """
@@ -181,6 +249,8 @@ async def resolve_analytics(intent: AnalyticsIntent, parameters: Optional[dict] 
             "- Общая стоимость контракта\n"
             "- Всего развернутых портов\n"
             "- Количество портов по городу и периоду\n\n"
+            "- Количество портов по месяцам\n\n"
+            "- Количество портов по городам\n\n"
             "Пожалуйста, задайте один из этих вопросов или спросите о документации."
         )
 
@@ -200,6 +270,14 @@ async def resolve_analytics(intent: AnalyticsIntent, parameters: Optional[dict] 
         if intent == AnalyticsIntent.TOTAL_PORTS:
             ports = await get_total_ports()
             return await _format_analytics_response(intent, ports)
+
+        if intent == AnalyticsIntent.PORTS_BY_MONTH:
+            rows = await get_ports_by_month()
+            return _format_ports_by_month_markdown(rows)
+        
+        if intent == AnalyticsIntent.PORTS_BY_LOCALITY:
+            rows = await get_ports_by_locality()
+            return _format_ports_by_locality_markdown(rows)
         
         if intent == AnalyticsIntent.PORTS_BY_LOCALITY_PERIOD:
             if not parameters:

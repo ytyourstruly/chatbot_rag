@@ -83,7 +83,34 @@ AND contractor_service.address.locality=$1
 AND contractor_service.address_smr_status_history.status_date_time >= $2::date     
 AND contractor_service.address_smr_status_history.status_date_time <= $3::date;
 """
- 
+_SQL_PORTS_BY_MONTH = """
+SELECT
+  to_char(h.status_date_time, 'YYYY-MM') AS month,
+  SUM(a.ports_count) AS ports
+FROM contractor_service.address a
+JOIN contractor_service.address_smr_status_history h
+  ON a.id = h.address_id
+WHERE a.smr_status = 'CONNECTION_ALLOWED'
+  AND h.status_date_time IS NOT NULL
+GROUP BY 1
+ORDER BY 1;
+"""
+
+_SQL_PORTS_BY_LOCALITY = """
+SELECT
+  a.locality AS locality,
+  SUM(a.ports_count) AS ports
+FROM contractor_service.address a
+JOIN contractor_service.address_smr_status_history h
+  ON a.id = h.address_id
+WHERE a.smr_status = 'CONNECTION_ALLOWED'
+  AND h.status_date_time IS NOT NULL
+  AND a.locality IS NOT NULL
+  AND btrim(a.locality) <> ''
+GROUP BY 1
+ORDER BY ports DESC;
+"""
+
 async def fetch_total_contract_amount() -> float:
     async with get_pool().acquire() as conn:
         result = await conn.fetchval(_SQL_TOTAL_AMOUNT)
@@ -116,3 +143,13 @@ async def fetch_ports_by_locality_period(
     async with get_pool().acquire() as conn:
         result = await conn.fetchval(_SQL_PORTS_BY_LOCALITY_PERIOD, locality, start_date_object, end_date_object)
     return int(result) if result is not None else 0
+
+async def fetch_ports_by_month() -> list[dict]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(_SQL_PORTS_BY_MONTH)
+    return [{"month": r["month"], "ports": int(r["ports"] or 0)} for r in rows]
+
+async def fetch_ports_by_locality() -> list[dict]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(_SQL_PORTS_BY_LOCALITY)
+    return [{"locality": r["locality"], "ports": int(r["ports"] or 0)} for r in rows]
