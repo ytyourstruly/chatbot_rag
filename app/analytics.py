@@ -372,7 +372,7 @@ def _format_address_status(not_found_rows: list[dict]) -> str:
         delivered_at = r.get("delivered_at")
         date_str     = _as_date_str(delivered_at) if delivered_at is not None else None
         if status_label is None:
-            status_label = f"неизвестный статус «{status_raw}»"
+            status_label = f"Ведутся проектно изыскательски работы"
         block = [
             f"**{r['address']}**",
             f"- Населённый пункт: {r['locality']}",
