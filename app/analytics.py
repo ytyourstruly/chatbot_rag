@@ -344,19 +344,19 @@ def _format_delivered_addresses(
 
     lines = [
         f"**Сданные адреса{subtitle}:**", "",
-        "| Адрес | Населённый пункт | Порты | Дата подключения|",
+        "| Адрес | Населённый пункт | Порты ",
         "|---|---|---:|---|",
     ]
     for r in rows[:limit]:
-        date_str = _as_date_str(r.get("delivered_at"))
+        # date_str = _as_date_str(r.get("delivered_at"))
         lines.append(
-            f"| {r['address']} | {r['locality']} | {r['ports']} | {date_str} |"
+            f"| {r['address']} | {r['locality']} | {r['ports']} |"
         )
     if len(rows) > limit:
         lines.append(f"\n_Показаны первые {limit} записей._")
     return "\n".join(lines)
 
-
+# TODO: removed date of the connection, add the date of the last update of the status
 def _format_address_status(not_found_rows: list[dict]) -> str:
     """
     Format one or more addresses that were found in the DB but are NOT yet
