@@ -145,17 +145,47 @@ MONTH MAPPING (2026):
   Июль     -> 2026-07    Август   -> 2026-08    Сентябрь -> 2026-09
   Октябрь  -> 2026-10    Ноябрь   -> 2026-11    Декабрь  -> 2026-12
 
-LOCALITY - extract the Russian city name as-is (e.g. "Астана", "Алматы").
+LOCALITY - CITY NAME ONLY. NEVER put a street name, avenue, building, or district here.
+  These are city names: Астана, Алматы, Шымкент, Актобе, Тараз, Павлодар...
+  These are NOT city names (they are street/address names): Сарайшык, Степан Разин, Бекарыс,
+  Шакарим, проспект, улица, переулок — these belong in address_search, never in locality.
+
+  ALWAYS return the city name in its Russian NOMINATIVE form (именительный падеж).
+  City names are declined in speech; restore the base form before returning:
+
+  Declined form in question        ->  Nominative form to return
+  ────────────────────────────────────────────────────────────────
+  "в Астане"  / "Астане"           ->  "Астана"
+  "в Алмате"  / "Алматы" / "в Алматы" -> "Алматы"
+  "в Шымкенте"                     ->  "Шымкент"
+  "в Актобе"                       ->  "Актобе"
+  "в Таразе"                       ->  "Тараз"
+  "в Павлодаре"                    ->  "Павлодар"
+  "в Усть-Каменогорске"            ->  "Усть-Каменогорск"
+  "в Семее"                        ->  "Семей"
+  "в Костанае"                     ->  "Костанай"
+  "в Кызылорде"                    ->  "Кызылорда"
+  "в Атырау"                       ->  "Атырау"
+  "в Актау"                        ->  "Актау"
+  "в Петропавловске"               ->  "Петропавловск"
+  "в Туркестане"                   ->  "Туркестан"
+  "в Кокшетау"                     ->  "Кокшетау"
+  "в Талдыкоргане"                 ->  "Талдыкорган"
+  "в Темиртау"                     ->  "Темиртау"
+
+  For any other city not listed, still return the nominative form yourself.
   If no city is mentioned -> null.
 
-ADDRESS_SEARCH - extract the street name and optional building number.
-  Strip leading words like "по", "статус по", "адрес", "улица" that are not
-  part of the name itself. Keep the number if present.
+ADDRESS_SEARCH - extract ONLY a street / building name + optional number.
+  This is NEVER a city name. Strip navigation words like "по", "статус по",
+  "адрес", "улица", "проспект" only when they are NOT part of the actual name.
+  Keep the building number if present.
   Examples:
     "дай статус по Сарайшык 4"         -> "Сарайшык 4"
     "статус адреса Степан Разин 14/1"  -> "Степан Разин 14/1"
     "что с Бекарыс 5/1"                -> "Бекарыс 5/1"
-  If no specific address is mentioned  -> null.
+    "адреса в Алмате"  (city, not street) -> address_search=null, locality="Алматы"
+  If no specific street/building is mentioned  -> null.
 
 ==========================================================
 EXAMPLES
@@ -199,6 +229,12 @@ EXAMPLES
 
   "адреса в Астане за январь"
   -> {{"intent":"delivered_addresses","parameters":{{"locality":"Астана","months":["2026-01"],"address_search":null}}}}
+
+  "сданные адреса в Алмате"
+  -> {{"intent":"delivered_addresses","parameters":{{"locality":"Алматы","months":null,"address_search":null}}}}
+
+  "порты в Алмате"
+  -> {{"intent":"ports","parameters":{{"locality":"Алматы","months":null,"group_by":"none"}}}}
 
   "дай статус по Сарайшык 4"
   -> {{"intent":"delivered_addresses","parameters":{{"locality":null,"months":null,"address_search":"Сарайшык 4"}}}}
@@ -259,6 +295,86 @@ SMR_STATUS_LABELS: dict[str, str] = {
 def smr_status_label(status: str) -> str:
     """Return a Russian label for an smr_status value, falling back to the raw value."""
     return SMR_STATUS_LABELS.get(status, status)
+
+
+# ---------------------------------------------------------------------------
+# City-name declension normaliser
+# ---------------------------------------------------------------------------
+
+# Maps every common declined (non-nominative) form of Kazakh city names back
+# to the nominative form stored in the database.  The LLM is instructed to do
+# this itself, but this dict acts as a deterministic safety net in case the LLM
+# returns a declined form anyway.
+_CITY_NOMINATIVE: dict[str, str] = {
+    # Астана
+    "астане": "Астана",
+    # Алматы — multiple common variants
+    "алмате": "Алматы",
+    "алматы": "Алматы",
+    "алма-ате": "Алматы",
+    "алма-аты": "Алматы",
+    # Шымкент
+    "шымкенте": "Шымкент",
+    "шимкенте": "Шымкент",
+    "шимкент": "Шымкент",
+    # Актобе
+    "актобе": "Актобе",
+    "актюбинске": "Актобе",
+    # Тараз
+    "таразе": "Тараз",
+    # Павлодар
+    "павлодаре": "Павлодар",
+    # Усть-Каменогорск
+    "усть-каменогорске": "Усть-Каменогорск",
+    "оскемене": "Усть-Каменогорск",
+    # Семей
+    "семее": "Семей",
+    "семипалатинске": "Семей",
+    # Костанай
+    "костанае": "Костанай",
+    "кустанае": "Костанай",
+    # Кызылорда
+    "кызылорде": "Кызылорда",
+    # Атырау
+    "атырау": "Атырау",
+    # Актау
+    "актау": "Актау",
+    # Петропавловск
+    "петропавловске": "Петропавловск",
+    # Туркестан
+    "туркестане": "Туркестан",
+    # Кокшетау
+    "кокшетау": "Кокшетау",
+    "кокшетауе": "Кокшетау",
+    # Талдыкорган
+    "талдыкоргане": "Талдыкорган",
+    # Темиртау
+    "темиртау": "Темиртау",
+    "темиртауе": "Темиртау",
+    # Рудный
+    "рудном": "Рудный",
+    # Жезказган
+    "жезказгане": "Жезказган",
+    # Экибастуз
+    "экибастузе": "Экибастуз",
+}
+
+
+def normalize_locality(city: str | None) -> str | None:
+    """
+    Normalise a city name to its database-stored nominative form.
+
+    The LLM is prompted to return nominative forms, but this function acts as
+    a deterministic safety net for any slippage.  Lookup is case-insensitive;
+    the original capitalisation of known cities is restored.
+
+    Unknown values are returned unchanged (with leading/trailing whitespace
+    stripped) so they can still be tried against the database.
+    """
+    if not city:
+        return None
+    normalised = _CITY_NOMINATIVE.get(city.strip().lower())
+    return normalised if normalised else city.strip()
 
 
 # ---------------------------------------------------------------------------

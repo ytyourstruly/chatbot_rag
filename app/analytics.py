@@ -37,6 +37,7 @@ from app.prompts.analytics_prompts import (
     format_total_ports_prompt,
     format_ports_scalar_prompt,
     smr_status_label,
+    normalize_locality,
 )
 
 logger = logging.getLogger(__name__)
@@ -305,6 +306,24 @@ def _format_ports_both_markdown(
     return "\n".join(lines)
 
 
+def _as_date_str(value) -> str:
+    """
+    Safely convert a DB date/timestamp value to a YYYY-MM-DD string.
+
+    asyncpg returns:
+      - datetime.date   for DATE columns  (e.g. o.end_date)
+      - datetime.datetime for TIMESTAMP columns (legacy paths)
+
+    Both are handled; None returns "—".
+    """
+    if value is None:
+        return "—"
+    # datetime.datetime has a .date() method; datetime.date does not
+    if hasattr(value, "date") and callable(value.date):
+        return str(value.date())
+    return str(value)
+
+
 def _format_delivered_addresses(
     rows: list[dict],
     locality: Optional[str] = None,
@@ -329,7 +348,7 @@ def _format_delivered_addresses(
         "|---|---|---:|---|",
     ]
     for r in rows[:limit]:
-        date_str = r["delivered_at"].date() if r.get("delivered_at") else "—"
+        date_str = _as_date_str(r.get("delivered_at"))
         lines.append(
             f"| {r['address']} | {r['locality']} | {r['ports']} | {date_str} |"
         )
@@ -351,8 +370,9 @@ def _format_address_status(not_found_rows: list[dict]) -> str:
         status_raw   = r.get("smr_status", "")
         status_label = smr_status_label(status_raw)
         delivered_at = r.get("delivered_at")
-        date_str     = delivered_at.date() if delivered_at else None
-
+        date_str     = _as_date_str(delivered_at) if delivered_at is not None else None
+        if status_label is None:
+            status_label = f"неизвестный статус «{status_raw}»"
         block = [
             f"**{r['address']}**",
             f"- Населённый пункт: {r['locality']}",
@@ -360,7 +380,7 @@ def _format_address_status(not_found_rows: list[dict]) -> str:
             f"- Статус: **{status_label}**",
         ]
         if date_str:
-            block.append(f"- Дата последнего статуса: {date_str}")
+            block.append(f"- Дата подключения дома: {date_str}")
         lines.append("\n".join(block))
 
     return "\n\n---\n\n".join(lines)
@@ -468,7 +488,7 @@ async def resolve_analytics(
 
         # ── ports (unified modular intent) ───────────────────────────────
         if intent == AnalyticsIntent.PORTS:
-            locality  = params.get("locality")       or None
+            locality  = normalize_locality(params.get("locality") or None)
             months    = params.get("months")         or None
             group_by  = params.get("group_by", "none")
 
@@ -524,7 +544,7 @@ async def resolve_analytics(
 
         # ── delivered_addresses ───────────────────────────────────────────
         if intent == AnalyticsIntent.DELIVERED_ADDRESSES:
-            locality       = params.get("locality")       or None
+            locality       = normalize_locality(params.get("locality") or None)
             months         = params.get("months")         or None
             address_search = params.get("address_search") or None
 

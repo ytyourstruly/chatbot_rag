@@ -34,6 +34,7 @@ Modularity — addresses:
                smr_status value, so the caller can show a human-readable
                "this address is IN_PROGRESS" message instead of a blank result.
 """
+import re
 import asyncpg
 import logging
 from app.config import settings
@@ -339,21 +340,24 @@ def _build_addresses_query(
     """
     Build a parameterised SQL query for delivered (or all-status) addresses.
 
+    Join structure
+    ──────────────
+    address → network_design_address → network_design → order
+    delivered_at is o.end_date (from the order record), NOT from
+    address_smr_status_history.  The history table is not used here.
+
     Parameters
     ──────────
-    locality            — filter to a specific city name
-    months              — filter to a list of "YYYY-MM" strings
-    address_search      — partial address name; tokenised and matched with one
-                          ILIKE '%token%' clause per whitespace-separated token,
-                          all AND-ed together.
-                          This handles the DB format "улица Сарайшык, 4" when
-                          the user types "Сарайшык 4": each token ("Сарайшык",
-                          "4") is checked independently, so the comma in the
-                          stored name is irrelevant.
-    include_all_statuses — when False (default) only rows with
-                           smr_status = 'CONNECTION_ALLOWED' are returned;
-                           when True the filter is omitted and smr_status is
-                           included in SELECT (used for the fallback path).
+    locality             — filter to a specific city name (a.locality)
+    months               — list of "YYYY-MM" strings; filtered on o.end_date
+    address_search       — partial address name; tokenised and matched with one
+                           ILIKE '%token%' clause per whitespace-separated token,
+                           all AND-ed together.
+                           Handles "Сарайшык 4" vs DB value "улица Сарайшык, 4".
+    include_all_statuses — False (default): only smr_status = 'CONNECTION_ALLOWED';
+                           True: no status filter, smr_status added to SELECT,
+                           LEFT JOINs on order chain so unordered addresses appear.
+                           Used for the step-2 fallback status lookup.
 
     Returns (sql, params) ready for conn.fetch().
     """
@@ -363,29 +367,25 @@ def _build_addresses_query(
     # ── SELECT ───────────────────────────────────────────────────────────────
     if include_all_statuses:
         select_block = (
-            "  a.name       AS address_name,\n"
+            "  a.name          AS address_name,\n"
             "  a.locality,\n"
             "  a.ports_count,\n"
             "  a.smr_status,\n"
-            "  MIN(h.status_date_time) AS delivered_at"
+            "  o.end_date       AS delivered_at"
         )
     else:
         select_block = (
-            "  a.name       AS address_name,\n"
+            "  a.name          AS address_name,\n"
             "  a.locality,\n"
             "  a.ports_count,\n"
-            "  MIN(h.status_date_time) AS delivered_at"
+            "  o.end_date       AS delivered_at"
         )
 
     # ── Static WHERE ─────────────────────────────────────────────────────────
-    where_clauses: list[str] = ["n.excluded = 'false'"]
+    where_clauses: list[str] = ["nda.excluded = 'false'"]
 
     if not include_all_statuses:
-        where_clauses += [
-            "a.smr_status = 'CONNECTION_ALLOWED'",
-            "h.status_date_time IS NOT NULL",
-            "h.status_id = '3'",
-        ]
+        where_clauses.append("a.smr_status = 'CONNECTION_ALLOWED'")
 
     # ── Dynamic WHERE (parameterised) ────────────────────────────────────────
     if locality:
@@ -394,56 +394,81 @@ def _build_addresses_query(
         idx += 1
 
     if months:
+        # Filter on o.end_date (the order completion date), not on history.
         where_clauses.append(
-            f"to_char(h.status_date_time, 'YYYY-MM') = ANY(${idx}::text[])"
+            f"to_char(o.end_date, 'YYYY-MM') = ANY(${idx}::text[])"
         )
         params.append(months)
         idx += 1
 
     if address_search:
-        # Split the search string into tokens and add one ILIKE clause per token,
-        # all AND-ed together.  This handles the mismatch between user input like
-        # "Сарайшык 4" and the DB value "улица Сарайшык, 4": each token is matched
-        # independently so punctuation in the stored name is irrelevant.
-        # Every token is a separate $N parameter — no string interpolation.
+        # Split into tokens — each matched independently with ILIKE so that
+        # "Сарайшык 4" finds "улица Сарайшык, 4" despite the comma.
+        #
+        # Building-number tokens (pure digits, or digits/digits like "14/1")
+        # are anchored to the DB separator ", NUMBER" so that "5" does NOT
+        # match "34/5".  The DB always stores the building number as
+        # ", <number>" (comma-space before the number), so the pattern
+        # "%, TOKEN%" matches the building number position exactly.
+        #
+        # Non-numeric tokens (street names etc.) keep the plain "%TOKEN%".
+        _BUILDING_NUM = re.compile(r"^\d+(/\d+)?[a-zA-Zа-яА-Я]?$")
         tokens = [t for t in address_search.split() if t]
         for token in tokens:
             where_clauses.append(f"a.name ILIKE ${idx}")
-            params.append(f"%{token}%")
+            if _BUILDING_NUM.match(token):
+                # Anchor to the ", NUMBER" separator used in the DB format
+                params.append(f"%, {token}%")
+            else:
+                params.append(f"%{token}%")
             idx += 1
 
     where_block = "\n  AND ".join(where_clauses)
 
-    # ── GROUP BY / ORDER BY ──────────────────────────────────────────────────
-    if include_all_statuses:
-        group_block   = "GROUP BY a.id, a.name, a.locality, a.ports_count, a.smr_status"
-    else:
-        group_block   = "GROUP BY a.id, a.name, a.locality, a.ports_count"
-
-    # Join strategy: for include_all_statuses we LEFT JOIN history so addresses
-    # that have never had any history entry still appear.
+    # ── JOIN block ───────────────────────────────────────────────────────────
+    # For the fallback (include_all_statuses) path we LEFT JOIN the order chain
+    # so that addresses with no network_design / order still appear (their
+    # end_date will be NULL).
     if include_all_statuses:
         join_block = (
-            "LEFT JOIN contractor_service.address_smr_status_history h\n"
-            "  ON a.id = h.address_id\n"
-            "JOIN contractor_service.network_design_address n\n"
-            "  ON n.address_id = a.id"
+            "JOIN  contractor_service.network_design_address nda\n"
+            "  ON  nda.address_id = a.id\n"
+            "LEFT JOIN contractor_service.network_design nd\n"
+            "  ON  nd.id = nda.network_design_id\n"
+            "LEFT JOIN contractor_service.\"order\" o\n"
+            "  ON  o.id = nd.order_id"
         )
     else:
         join_block = (
-            "JOIN contractor_service.address_smr_status_history h\n"
-            "  ON a.id = h.address_id\n"
-            "JOIN contractor_service.network_design_address n\n"
-            "  ON n.address_id = a.id"
+            "JOIN  contractor_service.network_design_address nda\n"
+            "  ON  nda.address_id = a.id\n"
+            "JOIN  contractor_service.network_design nd\n"
+            "  ON  nd.id = nda.network_design_id\n"
+            "JOIN  contractor_service.\"order\" o\n"
+            "  ON  o.id = nd.order_id"
+        )
+
+    # ── GROUP BY ─────────────────────────────────────────────────────────────
+    # o.end_date is a direct column (not an aggregate), so it must appear in
+    # GROUP BY.  This also deduplicates addresses that belong to multiple
+    # network_design rows — each distinct (address, end_date) pair becomes one
+    # row, which is the expected behaviour.
+    if include_all_statuses:
+        group_block = (
+            "GROUP BY a.id, a.name, a.locality, a.ports_count, a.smr_status, o.end_date"
+        )
+    else:
+        group_block = (
+            "GROUP BY a.id, a.name, a.locality, a.ports_count, o.end_date"
         )
 
     sql = (
         f"SELECT\n{select_block}\n"
-        f"FROM contractor_service.address a\n"
+        f"FROM  contractor_service.address a\n"
         f"{join_block}\n"
         f"WHERE {where_block}\n"
         f"{group_block}\n"
-        f"ORDER BY delivered_at DESC NULLS LAST;\n"
+        f"ORDER BY o.end_date DESC NULLS LAST, a.name;\n"
     )
 
     return sql, params
