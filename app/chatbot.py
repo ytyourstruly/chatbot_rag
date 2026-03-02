@@ -52,7 +52,7 @@ async def process_question(
         # (it's already formatted markdown, no streaming needed from DB)
         for line in result.splitlines(keepends=True):
             yield line
-        # yield result TODO: smoother UX?
+        # yield result TODO: smoother UX? yes
         return
     
     # ── Step 2: Vector search ────────────────────────────────────────────────

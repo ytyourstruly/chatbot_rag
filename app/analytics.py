@@ -80,6 +80,8 @@ async def detect_analytics_intent(
 
     try:
         response = await llm.ainvoke(messages)
+        # logger.info("LLM intent detection response: %s", response.content) --- DEBUG --- { "intent": "ports", "parameters": {"locality": "Астана", "months": null, "group_by": "none"}}
+        
         parsed = json.loads(response.content.strip())
         intent_str = parsed.get("intent", "none").lower()
         parameters = parsed.get("parameters", {})
@@ -106,335 +108,9 @@ async def detect_analytics_intent(
 
 
 # ---------------------------------------------------------------------------
-# Data-fetch helpers (with caching)
-# ---------------------------------------------------------------------------
-
-async def get_total_ports() -> int:
-    cached = cache_get("total_ports")
-    if cached is not None:
-        logger.info("Cache hit: total_ports")
-        return cached
-    from app.database import fetch_total_ports_raw
-    value = await fetch_total_ports_raw()
-    cache_set("total_ports", value, settings.cache_ttl_seconds)
-    return value
-
-
-async def get_ports(
-    locality: Optional[str] = None,
-    months: Optional[list[str]] = None,
-    group_by_locality: bool = False,
-    group_by_month: bool = False,
-):
-    """
-    Cached wrapper around database.fetch_ports().
-
-    Cache key encodes all four axes so every distinct combination is cached
-    independently.
-    """
-    key_months = ",".join(sorted(months)) if months else "all"
-    key_loc    = locality or "all"
-    key_gb     = f"gl{int(group_by_locality)}gm{int(group_by_month)}"
-    cache_key  = f"ports_{key_loc}_{key_months}_{key_gb}"
-
-    cached = cache_get(cache_key)
-    if cached is not None:
-        logger.info("Cache hit: %s", cache_key)
-        return cached
-
-    from app.database import fetch_ports
-    value = await fetch_ports(
-        locality=locality,
-        months=months,
-        group_by_locality=group_by_locality,
-        group_by_month=group_by_month,
-    )
-    cache_set(cache_key, value, settings.cache_ttl_seconds)
-    return value
-
-
-async def get_delivered_addresses(
-    locality: Optional[str] = None,
-    months: Optional[list[str]] = None,
-    address_search: Optional[str] = None,
-) -> dict:
-    """
-    Cached wrapper around database.fetch_addresses().
-
-    Returns the full dict:  {"rows": [...], "not_found_rows": [...] | None}
-
-    Cache key encodes all three filter axes.  When address_search is present
-    we skip caching (the result is already specific and likely not repeated).
-    """
-    if address_search:
-        # Skip cache for specific address lookups — not worth the key complexity.
-        from app.database import fetch_addresses
-        return await fetch_addresses(
-            locality=locality, months=months, address_search=address_search
-        )
-
-    key_loc    = locality or "all"
-    key_months = ",".join(sorted(months)) if months else "all"
-    cache_key  = f"delivered_addresses_{key_loc}_{key_months}"
-
-    cached = cache_get(cache_key)
-    if cached is not None:
-        logger.info("Cache hit: %s", cache_key)
-        return cached
-
-    from app.database import fetch_addresses
-    value = await fetch_addresses(locality=locality, months=months)
-    cache_set(cache_key, value, settings.cache_ttl_seconds)
-    return value
-
-
-async def get_objects_status() -> dict:
-    cache_key = "objects_status"
-    cached = cache_get(cache_key)
-    if cached is not None:
-        logger.info("Cache hit: %s", cache_key)
-        return cached
-    from app.database import fetch_objects_status
-    value = await fetch_objects_status()
-    cache_set(cache_key, value, settings.cache_ttl_seconds)
-    return value
-
-
-# ---------------------------------------------------------------------------
-# Markdown formatters
-# ---------------------------------------------------------------------------
-
-_MONTH_NAMES = {
-    "01": "Январь",  "02": "Февраль", "03": "Март",
-    "04": "Апрель",  "05": "Май",     "06": "Июнь",
-    "07": "Июль",    "08": "Август",  "09": "Сентябрь",
-    "10": "Октябрь", "11": "Ноябрь",  "12": "Декабрь",
-}
-
-
-def _month_label(ym: str) -> str:
-    """Convert "2026-02" → "Февраль 2026"."""
-    if ym and len(ym) == 7 and ym[4] == "-":
-        return f"{_MONTH_NAMES.get(ym[5:7], ym[5:7])} {ym[:4]}"
-    return ym
-
-
-def _format_ports_by_month_markdown(
-    rows: list[dict],
-    locality: Optional[str] = None,
-) -> str:
-    if not rows:
-        return "**Данных нет.**"
-
-    header = (
-        f"**Сданные порты по месяцам — {locality}:**"
-        if locality else
-        "**Сданные порты по месяцам:**"
-    )
-    lines = [header, "", "| Месяц | Порты |", "|---|---:|"]
-    total = 0
-    for r in rows:
-        p = int(r.get("ports") or 0)
-        total += p
-        lines.append(f"| {_month_label(r['month'])} | {p:,} |")
-    lines += ["", f"**Итого:** {total:,}"]
-    return "\n".join(lines)
-
-
-def _format_ports_by_locality_markdown(
-    rows: list[dict],
-    locality: Optional[str] = None,
-    months: Optional[list[str]] = None,
-    limit: int = 50,
-) -> str:
-    if not rows:
-        return "**Данных нет.**"
-
-    # Build context subtitle
-    parts = []
-    if months:
-        parts.append(", ".join(_month_label(m) for m in sorted(months)))
-    subtitle = f" ({', '.join(parts)})" if parts else ""
-
-    # Single-city, single-row view
-    if locality and len(rows) == 1:
-        r = rows[0]
-        return (
-            f"**Сданные порты — {r['locality']}{subtitle}:**\n\n"
-            f"| Населённый пункт | Порты |\n"
-            f"|---|---:|\n"
-            f"| {r['locality']} | {int(r.get('ports') or 0):,} |\n"
-        )
-
-    # Multi-row table
-    header = f"**Сданные порты по городам{subtitle}:**"
-    lines  = [header, "", "| Населённый пункт | Порты |", "|---|---:|"]
-    total  = 0
-    for r in rows[:limit]:
-        p = int(r.get("ports") or 0)
-        total += p
-        lines.append(f"| {r['locality']} | {p:,} |")
-
-    if len(rows) > limit:
-        lines.append(f"\n_Показаны топ-{limit} по количеству портов._")
-
-    lines += ["", f"**Итого (по показанным):** {total:,}"]
-    return "\n".join(lines)
-
-
-def _format_ports_both_markdown(
-    rows: list[dict],
-    months: Optional[list[str]] = None,
-    limit: int = 100,
-) -> str:
-    """Ports grouped by month AND locality."""
-    if not rows:
-        return "**Данных нет.**"
-
-    lines = ["**Сданные порты по месяцам и городам:**", "",
-             "| Месяц | Населённый пункт | Порты |", "|---|---|---:|"]
-    total = 0
-    for r in rows[:limit]:
-        p = int(r.get("ports") or 0)
-        total += p
-        lines.append(
-            f"| {_month_label(r.get('month', ''))} | {r.get('locality', '')} | {p:,} |"
-        )
-    if len(rows) > limit:
-        lines.append(f"\n_Показаны первые {limit} записей._")
-    lines += ["", f"**Итого (по показанным):** {total:,}"]
-    return "\n".join(lines)
-
-
-def _as_date_str(value) -> str:
-    """
-    Safely convert a DB date/timestamp value to a YYYY-MM-DD string.
-
-    asyncpg returns:
-      - datetime.date   for DATE columns  (e.g. o.end_date)
-      - datetime.datetime for TIMESTAMP columns (legacy paths)
-
-    Both are handled; None returns "—".
-    """
-    if value is None:
-        return "—"
-    # datetime.datetime has a .date() method; datetime.date does not
-    if hasattr(value, "date") and callable(value.date):
-        return str(value.date())
-    return str(value)
-
-
-def _format_delivered_addresses(
-    rows: list[dict],
-    locality: Optional[str] = None,
-    months: Optional[list[str]] = None,
-    limit: int = 50,
-) -> str:
-    """Format a list of delivered addresses as a Markdown table."""
-    if not rows:
-        return "**Сданных адресов не найдено.**"
-
-    # Build a context subtitle for the header
-    parts: list[str] = []
-    if locality:
-        parts.append(locality)
-    if months:
-        parts.append(", ".join(_month_label(m) for m in sorted(months)))
-    subtitle = f" — {', '.join(parts)}" if parts else ""
-
-    lines = [
-        f"**Сданные адреса{subtitle}:**", "",
-        "| Адрес | Населённый пункт | Порты |",
-        "|---|---|---:|",
-    ]
-    for r in rows[:limit]:
-        date_str = _as_date_str(r.get("delivered_at"))
-        lines.append(
-            f"| {r['address']} | {r['locality']} | {r['ports']} |"
-        )
-    if len(rows) > limit:
-        lines.append(f"\n_Показаны первые {limit} записей._")
-    return "\n".join(lines)
-
-
-def _format_address_status(not_found_rows: list[dict]) -> str:
-    """
-    Format one or more addresses that were found in the DB but are NOT yet
-    delivered (smr_status != CONNECTION_ALLOWED).
-    """
-    if not not_found_rows:
-        return "**Адрес не найден в базе данных.**"
-
-    lines: list[str] = []
-    for r in not_found_rows:
-        status_raw   = r.get("smr_status", "")
-        status_label = smr_status_label(status_raw)
-        delivered_at = r.get("delivered_at")
-        date_str     = _as_date_str(delivered_at) if delivered_at is not None else None
-        if status_label is None:
-            status_label = f"Ведутся проектно изыскательски работы"
-        block = [
-            f"**{r['address']}**",
-            f"- Населённый пункт: {r['locality']}",
-            f"- Количество портов: {r['ports']}",
-            f"- Статус: **{status_label}**",
-        ]
-        if date_str:
-            block.append(f"- Дата подключения дома: {date_str}")
-        lines.append("\n".join(block))
-
-    return "\n\n---\n\n".join(lines)
-
-
-def _format_objects_status_markdown(status: dict) -> str:
-    delivered  = status.get("delivered", 0)
-    in_progress = status.get("in_progress", 0)
-    excluded   = status.get("excluded", 0)
-    total      = delivered + in_progress + excluded
-
-    return "\n".join([
-        "**Статус проекта по СМР:**", "",
-        "| Статус | Объекты |", "|---|---:|",
-        f"| Сдано     | {delivered}   |",
-        f"| В работе  | {in_progress} |",
-        f"| Исключено | {excluded}    |",
-        f"| **Всего** | **{total}**   |",
-    ])
-
-
-# ---------------------------------------------------------------------------
-# LLM response formatter
-# ---------------------------------------------------------------------------
-
-async def _format_analytics_response(
-    intent: AnalyticsIntent,
-    result,
-    parameters: Optional[dict] = None,
-) -> str:
-    from app.llm import _build_llm
-
-    llm = _build_llm(streaming=False)
-
-    if intent == AnalyticsIntent.TOTAL_PORTS:
-        prompt = format_total_ports_prompt(result)
-    elif intent == AnalyticsIntent.PORTS:
-        locality = (parameters or {}).get("locality")
-        months   = (parameters or {}).get("months")
-        prompt   = format_ports_scalar_prompt(result, locality, months)
-    else:
-        return ""
-
-    try:
-        response = await llm.ainvoke([{"role": "user", "content": prompt}])
-        return response.content.strip()
-    except Exception as exc:
-        logger.error("Failed to format analytics response with LLM: %s", exc)
-        return f"**Итого:** {result:,}"
-
-
-# ---------------------------------------------------------------------------
 # Main resolver
 # ---------------------------------------------------------------------------
+
 
 async def resolve_analytics(
     intent: AnalyticsIntent,
@@ -619,3 +295,333 @@ async def resolve_analytics(
         )
 
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Data-fetch helpers (with caching)
+# ---------------------------------------------------------------------------
+
+async def get_total_ports() -> int:
+    cached = cache_get("total_ports")
+    if cached is not None:
+        logger.info("Cache hit: total_ports")
+        return cached
+    from app.database import fetch_total_ports_raw
+    value = await fetch_total_ports_raw()
+    cache_set("total_ports", value, settings.cache_ttl_seconds)
+    return value
+
+
+async def get_ports(
+    locality: Optional[str] = None,
+    months: Optional[list[str]] = None,
+    group_by_locality: bool = False,
+    group_by_month: bool = False,
+):
+    """
+    Cached wrapper around database.fetch_ports().
+
+    Cache key encodes all four axes so every distinct combination is cached
+    independently.
+    """
+    key_months = ",".join(sorted(months)) if months else "all"
+    key_loc    = locality or "all"
+    key_gb     = f"gl{int(group_by_locality)}gm{int(group_by_month)}"
+    cache_key  = f"ports_{key_loc}_{key_months}_{key_gb}"
+
+    cached = cache_get(cache_key)
+    if cached is not None:
+        logger.info("Cache hit: %s", cache_key)
+        return cached
+
+    from app.database import fetch_ports
+    value = await fetch_ports(
+        locality=locality,
+        months=months,
+        group_by_locality=group_by_locality,
+        group_by_month=group_by_month,
+    )
+    cache_set(cache_key, value, settings.cache_ttl_seconds)
+    return value
+
+
+async def get_delivered_addresses(
+    locality: Optional[str] = None,
+    months: Optional[list[str]] = None,
+    address_search: Optional[str] = None,
+) -> dict:
+    """
+    Cached wrapper around database.fetch_addresses().
+
+    Returns the full dict:  {"rows": [...], "not_found_rows": [...] | None}
+
+    Cache key encodes all three filter axes.  When address_search is present
+    we skip caching (the result is already specific and likely not repeated).
+    """
+    if address_search:
+        # Skip cache for specific address lookups — not worth the key complexity.
+        from app.database import fetch_addresses
+        return await fetch_addresses(
+            locality=locality, months=months, address_search=address_search
+        )
+
+    key_loc    = locality or "all"
+    key_months = ",".join(sorted(months)) if months else "all"
+    cache_key  = f"delivered_addresses_{key_loc}_{key_months}"
+
+    cached = cache_get(cache_key)
+    if cached is not None:
+        logger.info("Cache hit: %s", cache_key)
+        return cached
+
+    from app.database import fetch_addresses
+    value = await fetch_addresses(locality=locality, months=months)
+    cache_set(cache_key, value, settings.cache_ttl_seconds)
+    return value
+
+
+async def get_objects_status() -> dict:
+    cache_key = "objects_status"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        logger.info("Cache hit: %s", cache_key)
+        return cached
+    from app.database import fetch_objects_status
+    value = await fetch_objects_status()
+    cache_set(cache_key, value, settings.cache_ttl_seconds)
+    return value
+
+
+
+
+# ---------------------------------------------------------------------------
+# Markdown formatters
+# ---------------------------------------------------------------------------
+
+_MONTH_NAMES = {
+    "01": "Январь",  "02": "Февраль", "03": "Март",
+    "04": "Апрель",  "05": "Май",     "06": "Июнь",
+    "07": "Июль",    "08": "Август",  "09": "Сентябрь",
+    "10": "Октябрь", "11": "Ноябрь",  "12": "Декабрь",
+}
+
+
+def _month_label(ym: str) -> str:
+    """Convert "2026-02" → "Февраль 2026"."""
+    if ym and len(ym) == 7 and ym[4] == "-":
+        return f"{_MONTH_NAMES.get(ym[5:7], ym[5:7])} {ym[:4]}"
+    return ym
+
+
+def _format_ports_by_month_markdown(
+    rows: list[dict],
+    locality: Optional[str] = None,
+) -> str:
+    if not rows:
+        return "**Данных нет.**"
+
+    header = (
+        f"**Сданные порты по месяцам — {locality}:**"
+        if locality else
+        "**Сданные порты по месяцам:**"
+    )
+    lines = [header, "", "| Месяц | Порты |", "|---|---:|"]
+    total = 0
+    for r in rows:
+        p = int(r.get("ports") or 0)
+        total += p
+        lines.append(f"| {_month_label(r['month'])} | {p:,} |")
+    lines += ["", f"**Итого:** {total:,}"]
+    return "\n".join(lines)
+
+
+def _format_ports_by_locality_markdown(
+    rows: list[dict],
+    locality: Optional[str] = None,
+    months: Optional[list[str]] = None,
+    limit: int = 50,
+) -> str:
+    if not rows:
+        return "**Данных нет.**"
+
+    # Build context subtitle
+    parts = []
+    if months:
+        parts.append(", ".join(_month_label(m) for m in sorted(months)))
+    subtitle = f" ({', '.join(parts)})" if parts else ""
+
+    # Single-city, single-row view
+    if locality and len(rows) == 1:
+        r = rows[0]
+        return (
+            f"**Сданные порты — {r['locality']}{subtitle}:**\n\n"
+            f"| Населённый пункт | Порты |\n"
+            f"|---|---:|\n"
+            f"| {r['locality']} | {int(r.get('ports') or 0):,} |\n"
+        )
+
+    # Multi-row table
+    header = f"**Сданные порты по городам{subtitle}:**"
+    lines  = [header, "", "| Населённый пункт | Порты |", "|---|---:|"]
+    total  = 0
+    for r in rows[:limit]:
+        p = int(r.get("ports") or 0)
+        total += p
+        lines.append(f"| {r['locality']} | {p:,} |")
+
+    if len(rows) > limit:
+        lines.append(f"\n_Показаны топ-{limit} по количеству портов._")
+
+    lines += ["", f"**Итого (по показанным):** {total:,}"]
+    return "\n".join(lines)
+
+
+def _format_ports_both_markdown(
+    rows: list[dict],
+    months: Optional[list[str]] = None,
+    limit: int = 100,
+) -> str:
+    """Ports grouped by month AND locality."""
+    if not rows:
+        return "**Данных нет.**"
+
+    lines = ["**Сданные порты по месяцам и городам:**", "",
+             "| Месяц | Населённый пункт | Порты |", "|---|---|---:|"]
+    total = 0
+    for r in rows[:limit]:
+        p = int(r.get("ports") or 0)
+        total += p
+        lines.append(
+            f"| {_month_label(r.get('month', ''))} | {r.get('locality', '')} | {p:,} |"
+        )
+    if len(rows) > limit:
+        lines.append(f"\n_Показаны первые {limit} записей._")
+    lines += ["", f"**Итого (по показанным):** {total:,}"]
+    return "\n".join(lines)
+
+
+def _as_date_str(value) -> str:
+    """
+    Safely convert a DB date/timestamp value to a YYYY-MM-DD string.
+
+    asyncpg returns:
+      - datetime.date   for DATE columns  (e.g. o.end_date)
+      - datetime.datetime for TIMESTAMP columns (legacy paths)
+
+    Both are handled; None returns "—".
+    """
+    if value is None:
+        return "—"
+    # datetime.datetime has a .date() method; datetime.date does not
+    if hasattr(value, "date") and callable(value.date):
+        return str(value.date())
+    return str(value)
+
+
+def _format_delivered_addresses(
+    rows: list[dict],
+    locality: Optional[str] = None,
+    months: Optional[list[str]] = None,
+    limit: int = 50,
+) -> str:
+    """Format a list of delivered addresses as a Markdown table."""
+    if not rows:
+        return "**Сданных адресов не найдено.**"
+
+    # Build a context subtitle for the header
+    parts: list[str] = []
+    if locality:
+        parts.append(locality)
+    if months:
+        parts.append(", ".join(_month_label(m) for m in sorted(months)))
+    subtitle = f" — {', '.join(parts)}" if parts else ""
+
+    lines = [
+        f"**Сданные адреса{subtitle}:**", "",
+        "| Адрес | Населённый пункт | Порты | Дата сдачи |",
+        "|---|---|---|---:|",
+    ]
+    for r in rows[:limit]:
+        date_str = _as_date_str(r.get("delivered_at"))
+        lines.append(
+            f"| {r['address']} | {r['locality']} | {r['ports']} | {date_str}  |"
+        )
+    if len(rows) > limit:
+        lines.append(f"\n_Показаны первые {limit} записей._")
+    return "\n".join(lines)
+
+
+def _format_address_status(not_found_rows: list[dict]) -> str:
+    """
+    Format one or more addresses that were found in the DB but are NOT yet
+    delivered (smr_status != CONNECTION_ALLOWED).
+    """
+    if not not_found_rows:
+        return "**Адрес не найден в базе данных.**"
+
+    lines: list[str] = []
+    for r in not_found_rows:
+        status_raw   = r.get("smr_status", "")
+        status_label = smr_status_label(status_raw)
+        delivered_at = r.get("delivered_at")
+        date_str     = _as_date_str(delivered_at) if delivered_at is not None else None
+        if status_label is None:
+            status_label = f"Ведутся проектно изыскательски работы"
+        block = [
+            f"**{r['address']}**",
+            f"- Населённый пункт: {r['locality']}",
+            f"- Количество портов: {r['ports']}",
+            f"- Статус: **{status_label}**",
+        ]
+        if date_str:
+            block.append(f"- Дата подключения дома: {date_str}")
+        lines.append("\n".join(block))
+
+    return "\n\n---\n\n".join(lines)
+
+
+def _format_objects_status_markdown(status: dict) -> str:
+    delivered  = status.get("delivered", 0)
+    in_progress = status.get("in_progress", 0)
+    excluded   = status.get("excluded", 0)
+    total      = delivered + in_progress + excluded
+
+    return "\n".join([
+        "**Статус проекта по СМР:**", "",
+        "| Статус | Объекты |", "|---|---:|",
+        f"| Сдано     | {delivered}   |",
+        f"| В работе  | {in_progress} |",
+        f"| Исключено | {excluded}    |",
+        f"| **Всего** | **{total}**   |",
+    ])
+
+
+# ---------------------------------------------------------------------------
+# LLM response formatter
+# ---------------------------------------------------------------------------
+
+async def _format_analytics_response(
+    intent: AnalyticsIntent,
+    result,
+    parameters: Optional[dict] = None,
+) -> str:
+    from app.llm import _build_llm
+
+    llm = _build_llm(streaming=False)
+
+    if intent == AnalyticsIntent.TOTAL_PORTS:
+        prompt = format_total_ports_prompt(result)
+    elif intent == AnalyticsIntent.PORTS:
+        locality = (parameters or {}).get("locality")
+        months   = (parameters or {}).get("months")
+        prompt   = format_ports_scalar_prompt(result, locality, months)
+    else:
+        return ""
+
+    try:
+        response = await llm.ainvoke([{"role": "user", "content": prompt}])
+        return response.content.strip()
+    except Exception as exc:
+        logger.error("Failed to format analytics response with LLM: %s", exc)
+        return f"**Итого:** {result:,}"
+
