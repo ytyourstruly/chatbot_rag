@@ -66,7 +66,6 @@ async def on_message(message: cl.Message):
 
     # Stream response tokens
     response_msg = cl.Message(content="")
-    full_response = ""
     first_token = True
 
     async for token in process_question(question, on_step=on_step):
@@ -75,7 +74,6 @@ async def on_message(message: cl.Message):
             await step_msg.remove()
             await response_msg.send()
             first_token = False
-        full_response += token
         await response_msg.stream_token(token)
 
     await response_msg.update()

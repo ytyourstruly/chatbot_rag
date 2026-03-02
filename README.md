@@ -1,7 +1,6 @@
 # Website Chatbot — MVP
 
-A streaming RAG + analytics chatbot built with FastAPI, LangChain, Chainlit,
-FAISS, asyncpg, and OpenAI.
+A streaming analytics chatbot built with LangChain, Chainlit, asyncpg, and OpenAI.
 
 ```
 docs/                  ← Put your .md / .html / .txt documentation here
@@ -10,10 +9,9 @@ app/
   database.py          ← asyncpg pool + hardcoded SQL queries
   cache.py             ← In-memory TTL cache
   analytics.py         ← Intent detection + DB query execution
-  vector_store.py      ← FAISS load + similarity search
+  vector_store.py      ← document loader
   llm.py               ← Streaming OpenAI chat
   chatbot.py           ← Orchestration pipeline
-  main.py              ← FastAPI app (SSE streaming endpoint)
 scripts/
   ingest.py            ← One-time doc ingestion → FAISS index
 chainlit_app.py        ← Chainlit UI frontend
@@ -65,13 +63,13 @@ GRANT SELECT ON contracts TO readonly_user;
 Place your website documentation (`.md`, `.html`, or `.txt` files) in the
 `docs/` folder. A sample file is already included.
 
-### 5. Build the FAISS index
+### 5. Ingest documents
 
 ```bash
 python scripts/ingest.py
 ```
 
-This generates a `faiss_index/` directory. Re-run whenever docs change.
+Run this whenever docs change to refresh the document store used by the app.
 
 ---
 
@@ -85,23 +83,7 @@ chainlit run chainlit_app.py --port 8001
 
 Open http://localhost:8001
 
-### Option B — FastAPI only (REST API / headless)
-
-```bash
-uvicorn app.main:app --reload --port 8000
-```
-
-- Swagger UI: http://localhost:8000/docs
-- Chat endpoint: `POST /chat` with `{"question": "..."}`
-- Responses are streamed as Server-Sent Events.
-
-**Example curl:**
-```bash
-curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is the total contract amount?"}' \
-  --no-buffer
-```
+<!-- FastAPI/headless mode removed from this README -->
 
 ---
 
@@ -109,22 +91,15 @@ curl -X POST http://localhost:8000/chat \
 
 ```
 User question
-     │
-     ▼
-FAISS similarity search (top_k=3)
-     │
-     ├─ score ≥ 0.75 ──────────► Stream LLM answer (RAG context)
-     │
-     └─ score < 0.75
-           │
-           ▼
-     Keyword analytics detection
-           │
-           ├─ "total amount" / "total revenue" ──► SUM(amount) from DB
-           ├─ "total ports" / "how many ports"  ──► SUM(total_ports_count) from DB
-           ├─ other analytics signal            ──► "Only 2 queries supported"
-           │
-           └─ not analytical ──────────────────► Stream LLM (partial context or general)
+  │
+  ▼
+Keyword analytics detection
+  │
+  ├─ "total amount" / "total revenue" ──► SUM(amount) from DB
+  ├─ "total ports" / "how many ports"  ──► SUM(total_ports_count) from DB
+  ├─ other analytics signal            ──► "Only 2 queries supported"
+  │
+  └─ not analytical ──────────────────► Stream LLM (general answer)
 ```
 
 ---
@@ -143,7 +118,7 @@ FAISS similarity search (top_k=3)
 
 | Concern | Current (MVP) | Next step |
 |---|---|---|
-| FAISS index | In-process, in-memory | Migrate to Pinecone / pgvector |
+| Vector index | In-process, in-memory | Migrate to Pinecone / pgvector |
 | Analytics cache | In-memory dict | Redis |
 | DB connections | asyncpg pool | PgBouncer in front |
 | LLM | OpenAI API | Add fallback model |

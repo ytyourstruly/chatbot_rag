@@ -50,7 +50,9 @@ async def process_question(
         result = await resolve_analytics(intent, parameters)
         # Yield the full analytics result as a single chunk
         # (it's already formatted markdown, no streaming needed from DB)
-        yield result
+        for line in result.splitlines(keepends=True):
+            yield line
+        # yield result TODO: smoother UX?
         return
     
     # ── Step 2: Vector search ────────────────────────────────────────────────
